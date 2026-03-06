@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "leanrl"
+version = "0.1.0"
+description = "A minimal RL post-training framework for LLMs using Ray + PyTorch + vLLM"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4",
+    "transformers>=4.45",
+    "vllm>=0.6.0",
+    "ray>=2.38",
+    "deepspeed>=0.15",
+    "datasets",
+    "wandb",
+    "docker",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[project.scripts]
+leanrl-train = "leanrl.trainer:main"
+
+[tool.setuptools.packages.find]
+include = ["leanrl*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
