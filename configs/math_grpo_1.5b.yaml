@@ -45,6 +45,8 @@ infra:
   vllm_enable_sleep: true
   vllm_tensor_parallel_size: 1
   deepspeed_stage: 2
+  offload_optimizer: false
+  ray_address: "auto"
 
 logging:
   use_wandb: false

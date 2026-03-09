@@ -18,13 +18,28 @@ LeanRL implements **GRPO (Group Relative Policy Optimization)** for both math ve
 # Install
 pip install -e ".[dev]"
 
-# Start Ray
-ray start --head --num-gpus 2
+# 2-GPU setup (recommended)
+#
+# GPU 0: Policy + Reference model (DeepSpeed)
+# GPU 1: vLLM rollout engine (via Ray)
+#
+CUDA_VISIBLE_DEVICES=1 ray start --head --num-gpus=1
+# Make sure your config has (either in YAML or via TrainConfig):
+# infra:
+#   ray_address: "auto"
+#
+# so that the trainer connects to the external Ray cluster instead of
+# creating a local one.
+
 
 # Train on GSM8K (math)
+CUDA_VISIBLE_DEVICES=0 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 python -m leanrl.trainer --config configs/math_grpo_1.5b.yaml
 
 # Train on SWE-bench
+CUDA_VISIBLE_DEVICES=0 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 bash scripts/setup_swe_docker.sh  # pull Docker images first
 python -m leanrl.trainer --config configs/swe_grpo_1.5b.yaml
 ```

@@ -142,21 +142,26 @@ class RolloutEngine:
     def update_weights(self, state_dict: dict[str, Tensor]):
         """Sync policy weights into the vLLM engine.
 
-        Uses vLLM's weight update mechanism via the model runner.
+        Loads the HuggingFace model inside vLLM with the provided state dict.
+        This path is compatible with recent vLLM versions where the old
+        `vllm.worker` module and legacy weight-transfer helpers were removed.
         """
         try:
-            from vllm.worker.worker import Worker
-
             model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
-            model.load_weights(state_dict.items())
-            logger.info("vLLM weights updated successfully")
-        except Exception as e:
-            logger.warning(f"Weight update via model_runner failed, trying collective_rpc: {e}")
-            try:
-                self.llm.collective_rpc("update_weights", args=(state_dict,))
-            except Exception as e2:
-                logger.error(f"Weight sync failed: {e2}")
-                raise
+        except AttributeError as e:
+            logger.error(f"Failed to access vLLM underlying model for weight update: {e}")
+            raise
+
+        # Use standard PyTorch load_state_dict. We allow non-strict loading to
+        # tolerate minor differences (e.g., buffers) between training and
+        # inference graphs while still updating all matching parameters.
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if missing or unexpected:
+            logger.warning(
+                "vLLM weight update completed with mismatches: "
+                f"{len(missing)} missing keys, {len(unexpected)} unexpected keys."
+            )
+        logger.info("vLLM weights updated successfully via load_state_dict")
 
     def sleep(self):
         """Release GPU memory (sleep mode)."""

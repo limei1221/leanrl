@@ -173,7 +173,13 @@ class GRPOTrainer:
                 except Exception:
                     pass
 
+                # Free GPU memory held by the frozen reference model
+                self.ref_model.offload_to_cpu()
+
                 step_metrics = self._train_on_experience(experience)
+
+                # Bring reference model back for next rollout
+                self.ref_model.reload_to_gpu()
 
                 # --- Sync weights back to vLLM ---
                 try:

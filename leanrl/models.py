@@ -75,14 +75,19 @@ def get_deepspeed_config(
             "overlap_comm": True,
             "contiguous_gradients": True,
             "reduce_bucket_size": 5e7,
+            **({"offload_optimizer": {"device": "cpu", "pin_memory": True}}
+               if infra.offload_optimizer else {}),
         },
         "scheduler": {
             "type": "WarmupCosineLR",
             "params": {
-                "warmup_min_lr": 0,
-                "warmup_max_lr": training.lr,
-                "warmup_num_steps": warmup_steps,
+                # WarmupCosineLR in this DeepSpeed version expects ratios, not
+                # absolute LRs. It scales the optimizer's base LR (training.lr)
+                # by these ratios over the course of training.
                 "total_num_steps": total_steps,
+                "warmup_min_ratio": 0.0,
+                "warmup_num_steps": warmup_steps,
+                "cos_min_ratio": 0.0,
             },
         },
         "optimizer": {
@@ -245,6 +250,15 @@ class ReferenceModel:
         self.model.eval()
         self.model.to(device)
         self.device = device
+
+    def offload_to_cpu(self):
+        """Move model weights to CPU to free GPU memory during training."""
+        self.model.to("cpu")
+        torch.cuda.empty_cache()
+
+    def reload_to_gpu(self):
+        """Move model weights back to GPU for the next rollout."""
+        self.model.to(self.device)
 
     @torch.no_grad()
     def forward_logprobs(

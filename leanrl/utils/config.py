@@ -74,6 +74,7 @@ class InfraConfig:
     vllm_enable_sleep: bool = True
     vllm_tensor_parallel_size: int = 1
     deepspeed_stage: int = 2
+    offload_optimizer: bool = False
     ray_address: Optional[str] = None
 
 
