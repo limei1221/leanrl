@@ -13,6 +13,22 @@ from leanrl.utils.config import RolloutConfig, InfraConfig
 from leanrl.utils.logging import logger
 
 
+class WeightUpdateExtension:
+    """vLLM worker extension for RLHF weight synchronization.
+
+    This class is NOT a subclass of the vLLM Worker. vLLM mixes it into the
+    worker at runtime via ``worker_extension_cls``, so ``self.model_runner``
+    is available from the underlying worker. Methods defined here are callable
+    via ``LLM.collective_rpc()``.
+    """
+
+    def update_model_weights(self, state_dict: dict) -> dict:
+        """Load a state dict into the vLLM model in-place."""
+        model = self.model_runner.model
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        return {"missing": len(missing), "unexpected": len(unexpected)}
+
+
 def extract_old_log_probs(
     token_ids: list[int],
     token_logprobs: Optional[list[dict]],
@@ -68,6 +84,7 @@ class RolloutEngine:
             tensor_parallel_size=infra_cfg.vllm_tensor_parallel_size,
             trust_remote_code=True,
             dtype="bfloat16",
+            worker_extension_cls="leanrl.rollout.WeightUpdateExtension",
         )
 
         tok_path = tokenizer_path or model_path
@@ -140,28 +157,25 @@ class RolloutEngine:
         return results
 
     def update_weights(self, state_dict: dict[str, Tensor]):
-        """Sync policy weights into the vLLM engine.
+        """Sync policy weights into the vLLM engine via collective_rpc.
 
-        Loads the HuggingFace model inside vLLM with the provided state dict.
-        This path is compatible with recent vLLM versions where the old
-        `vllm.worker` module and legacy weight-transfer helpers were removed.
+        Uses the official ``LLM.collective_rpc`` API to dispatch the weight
+        update to all vLLM workers through the ``WeightUpdateExtension``.
+        This is stable across vLLM V0/V1 engines and single/multi-process
+        executor backends.
         """
-        try:
-            model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
-        except AttributeError as e:
-            logger.error(f"Failed to access vLLM underlying model for weight update: {e}")
-            raise
-
-        # Use standard PyTorch load_state_dict. We allow non-strict loading to
-        # tolerate minor differences (e.g., buffers) between training and
-        # inference graphs while still updating all matching parameters.
-        missing, unexpected = model.load_state_dict(state_dict, strict=False)
-        if missing or unexpected:
-            logger.warning(
-                "vLLM weight update completed with mismatches: "
-                f"{len(missing)} missing keys, {len(unexpected)} unexpected keys."
-            )
-        logger.info("vLLM weights updated successfully via load_state_dict")
+        results = self.llm.collective_rpc(
+            "update_model_weights",
+            args=(state_dict,),
+        )
+        for result in results:
+            if result["missing"] or result["unexpected"]:
+                logger.warning(
+                    "vLLM weight update completed with mismatches: "
+                    f"{result['missing']} missing keys, "
+                    f"{result['unexpected']} unexpected keys."
+                )
+        logger.info("vLLM weights updated via collective_rpc")
 
     def sleep(self):
         """Release GPU memory (sleep mode)."""
