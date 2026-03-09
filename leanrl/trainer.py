@@ -235,6 +235,7 @@ class GRPOTrainer:
                     attention_mask=mb_attn_mask,
                     response_ids=mb_response_ids,
                     response_mask=mb_resp_mask,
+                    pad_token_id=self.tokenizer.pad_token_id,
                 )
 
                 # Compute GRPO loss

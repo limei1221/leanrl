@@ -132,10 +132,11 @@ class SingleTurnExecutor:
         ).to(self.ref_model.device)
 
         ref_lp = self.ref_model.forward_logprobs(
-            input_ids,
-            attention_mask,
-            response_ids,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            response_ids=response_ids,
             response_mask=response_mask,
+            pad_token_id=pad_id,
         )
 
         # Split back to per-rollout tensors
