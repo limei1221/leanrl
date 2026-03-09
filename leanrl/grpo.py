@@ -41,9 +41,12 @@ def compute_kl_penalty(
     ref_log_probs: Tensor,
     mask: Tensor,
 ) -> Tensor:
-    """Compute per-sequence KL divergence KL(pi || pi_ref).
+    """Compute a k3 per-token KL estimator for KL(pi || pi_ref).
 
-    Uses the approximation: KL = mean over tokens of (log_pi - log_pi_ref).
+    Uses the positive estimator:
+        k3 = exp(log_pi_ref - log_pi) - (log_pi_ref - log_pi) - 1
+    This has the same expectation as KL(pi || pi_ref) under pi samples,
+    while avoiding negative minibatch KL estimates from the k1 estimator.
 
     Args:
         log_probs: (B, T) per-token log probs from current policy.
@@ -51,9 +54,10 @@ def compute_kl_penalty(
         mask: (B, T) binary mask for valid response tokens.
 
     Returns:
-        kl: scalar mean KL divergence.
+        kl: scalar masked mean k3 KL estimate.
     """
-    per_token_kl = log_probs - ref_log_probs
+    delta = ref_log_probs - log_probs
+    per_token_kl = torch.exp(delta) - delta - 1.0
     masked_kl = (per_token_kl * mask).sum() / mask.sum().clamp(min=1)
     return masked_kl
 

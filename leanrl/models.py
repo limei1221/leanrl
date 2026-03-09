@@ -68,7 +68,11 @@ class PolicyModel:
         infra_cfg: InfraConfig,
         total_steps: int,
     ):
-        dtype = torch.bfloat16 if model_cfg.dtype == "bf16" else torch.float16
+        dtype = (
+            torch.bfloat16 if model_cfg.dtype == "bf16"
+            else torch.float16 if model_cfg.dtype == "fp16"
+            else torch.float32
+        )
         logger.info(f"Loading policy model: {model_cfg.model_name_or_path}")
         self.model = AutoModelForCausalLM.from_pretrained(
             model_cfg.model_name_or_path,
@@ -178,7 +182,11 @@ class ReferenceModel:
     """Frozen reference model for KL computation. No optimizer, eval-only."""
 
     def __init__(self, model_cfg: ModelConfig, device: torch.device):
-        dtype = torch.bfloat16 if model_cfg.dtype == "bf16" else torch.float16
+        dtype = (
+            torch.bfloat16 if model_cfg.dtype == "bf16"
+            else torch.float16 if model_cfg.dtype == "fp16"
+            else torch.float32
+        )
         logger.info(f"Loading reference model: {model_cfg.ref_model_name_or_path}")
         self.model = AutoModelForCausalLM.from_pretrained(
             model_cfg.ref_model_name_or_path,

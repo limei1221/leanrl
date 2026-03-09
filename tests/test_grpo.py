@@ -103,6 +103,13 @@ class TestKLPenalty:
         kl = compute_kl_penalty(lp, ref_lp, mask)
         assert kl.item() > 0
 
+    def test_kl_positive_when_flipped(self):
+        lp = -torch.ones(4, 10)
+        ref_lp = torch.zeros(4, 10)
+        mask = torch.ones(4, 10)
+        kl = compute_kl_penalty(lp, ref_lp, mask)
+        assert kl.item() > 0
+
 
 class TestCombinedLoss:
     def test_combined_loss_returns_metrics(self):
