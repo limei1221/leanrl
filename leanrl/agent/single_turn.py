@@ -91,7 +91,7 @@ class SingleTurnExecutor:
         advantages = compute_grpo_advantages(rewards, G, eps=cfg.grpo.advantage_eps)
 
         # 4. Reference log-probs (batched)
-        ref_log_probs_list = self._compute_ref_logprobs(rollouts)
+        ref_log_probs_list = self._compute_ref_logprobs(rollouts, tokenizer)
 
         # 5. Build Experience
         experience = build_experience_from_rollouts(
@@ -104,24 +104,39 @@ class SingleTurnExecutor:
         experience.labels = expanded_labels
         return experience
 
-    def _compute_ref_logprobs(self, rollouts: list[RolloutResult]) -> list[Tensor]:
+    def _compute_ref_logprobs(self, rollouts: list[RolloutResult], tokenizer) -> list[Tensor]:
         """Compute reference model log-probs for each rollout."""
         if self.ref_model is None:
             return [torch.zeros_like(r.old_log_probs) for r in rollouts]
 
         from leanrl.experience import pad_sequences
 
+        pad_id = tokenizer.pad_token_id if tokenizer and tokenizer.pad_token_id is not None else 0
         input_ids = pad_sequences(
             [r.full_ids for r in rollouts],
-            pad_value=0,
+            pad_value=pad_id,
         ).to(self.ref_model.device)
-        attention_mask = (input_ids != 0).long().to(self.ref_model.device)
+        attention_mask = (input_ids != pad_id).long().to(self.ref_model.device)
         response_ids = pad_sequences(
             [r.response_ids for r in rollouts],
-            pad_value=0,
+            pad_value=pad_id,
+        ).to(self.ref_model.device)
+        response_mask = pad_sequences(
+            [
+                r.response_mask
+                if r.response_mask is not None
+                else torch.ones(r.response_len, dtype=torch.float32)
+                for r in rollouts
+            ],
+            pad_value=0.0,
         ).to(self.ref_model.device)
 
-        ref_lp = self.ref_model.forward_logprobs(input_ids, attention_mask, response_ids)
+        ref_lp = self.ref_model.forward_logprobs(
+            input_ids,
+            attention_mask,
+            response_ids,
+            response_mask=response_mask,
+        )
 
         # Split back to per-rollout tensors
         result = []

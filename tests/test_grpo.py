@@ -39,6 +39,16 @@ class TestComputeGRPOAdvantages:
         for s in group_sums:
             assert abs(s.item()) < 1e-4
 
+    def test_group_size_one_is_finite_zero(self):
+        rewards = torch.tensor([1.0, 2.0, -3.0])
+        adv = compute_grpo_advantages(rewards, n_samples_per_prompt=1)
+        assert torch.isfinite(adv).all()
+        assert torch.allclose(adv, torch.zeros_like(adv))
+
+    def test_invalid_group_size_raises(self):
+        with pytest.raises(ValueError):
+            compute_grpo_advantages(torch.ones(4), n_samples_per_prompt=3)
+
 
 class TestGRPOPolicyLoss:
     def test_zero_advantage_zero_loss(self):

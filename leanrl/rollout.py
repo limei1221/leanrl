@@ -13,6 +13,30 @@ from leanrl.utils.config import RolloutConfig, InfraConfig
 from leanrl.utils.logging import logger
 
 
+def extract_old_log_probs(
+    token_ids: list[int],
+    token_logprobs: Optional[list[dict]],
+) -> list[float]:
+    """Extract generated-token log-probs aligned with token_ids."""
+    if not token_logprobs:
+        return [0.0] * len(token_ids)
+
+    log_probs_list: list[float] = []
+    for i, token_id in enumerate(token_ids):
+        if i >= len(token_logprobs):
+            log_probs_list.append(0.0)
+            continue
+
+        lp_dict = token_logprobs[i]
+        if not lp_dict:
+            log_probs_list.append(0.0)
+            continue
+
+        token_lp = lp_dict.get(token_id)
+        log_probs_list.append(token_lp.logprob if token_lp is not None else 0.0)
+    return log_probs_list
+
+
 @ray.remote(num_gpus=1)
 class RolloutEngine:
     """Ray actor that wraps a vLLM engine for high-throughput generation.
@@ -95,17 +119,10 @@ class RolloutEngine:
                 resp_ids = torch.tensor(completion.token_ids, dtype=torch.long)
                 full_ids = torch.cat([prompt_ids, resp_ids])
 
-                # Extract per-token log probs
-                log_probs_list = []
-                if completion.logprobs:
-                    for lp_dict in completion.logprobs:
-                        if lp_dict:
-                            token_id = list(lp_dict.keys())[0]
-                            log_probs_list.append(lp_dict[token_id].logprob)
-                        else:
-                            log_probs_list.append(0.0)
-                else:
-                    log_probs_list = [0.0] * len(completion.token_ids)
+                log_probs_list = extract_old_log_probs(
+                    completion.token_ids,
+                    completion.logprobs,
+                )
 
                 old_log_probs = torch.tensor(log_probs_list, dtype=torch.float32)
 

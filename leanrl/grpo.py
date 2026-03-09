@@ -28,10 +28,18 @@ def compute_grpo_advantages(
     Returns:
         advantages: (B*G,) group-normalized advantages.
     """
+    if n_samples_per_prompt <= 0:
+        raise ValueError("n_samples_per_prompt must be > 0")
+    if rewards.numel() % n_samples_per_prompt != 0:
+        raise ValueError(
+            f"rewards size ({rewards.numel()}) must be divisible by "
+            f"n_samples_per_prompt ({n_samples_per_prompt})"
+        )
+
     G = n_samples_per_prompt
     grouped = rewards.view(-1, G)
     mean = grouped.mean(dim=1, keepdim=True)
-    std = grouped.std(dim=1, keepdim=True)
+    std = grouped.std(dim=1, keepdim=True, unbiased=False)
     advantages = (grouped - mean) / (std + eps)
     return advantages.reshape(-1)
 

@@ -143,7 +143,7 @@ class MultiTurnExecutor:
         rewards = torch.tensor(all_rewards, dtype=torch.float32)
         advantages = compute_grpo_advantages(rewards, G, eps=cfg.grpo.advantage_eps)
 
-        ref_log_probs_list = self._compute_ref_logprobs(all_rollouts)
+        ref_log_probs_list = self._compute_ref_logprobs(all_rollouts, tokenizer)
 
         experience = self._build_experience(
             all_rollouts, rewards, advantages, ref_log_probs_list, tokenizer
@@ -244,6 +244,7 @@ class MultiTurnExecutor:
 
         all_response_ids: list[int] = []
         all_log_probs: list[float] = []
+        all_response_mask: list[float] = []
         prompt_ids_tensor = None
 
         for turn in range(max_turns):
@@ -267,6 +268,7 @@ class MultiTurnExecutor:
             # Accumulate response tokens and log probs
             all_response_ids.extend(result.response_ids.tolist())
             all_log_probs.extend(result.old_log_probs.tolist())
+            all_response_mask.extend([1.0] * len(result.response_ids))
 
             # Parse action and execute
             action_type, action_content = parse_action(result.response_text)
@@ -305,6 +307,7 @@ class MultiTurnExecutor:
                 # Pad log_probs with zeros for observation tokens (masked out during training)
                 all_response_ids.extend(obs_tokens)
                 all_log_probs.extend([0.0] * len(obs_tokens))
+                all_response_mask.extend([0.0] * len(obs_tokens))
 
         # Assemble final RolloutResult
         if prompt_ids_tensor is None:
@@ -312,6 +315,7 @@ class MultiTurnExecutor:
 
         response_ids = torch.tensor(all_response_ids, dtype=torch.long)
         old_log_probs = torch.tensor(all_log_probs, dtype=torch.float32)
+        response_mask = torch.tensor(all_response_mask, dtype=torch.float32)
         full_ids = torch.cat([prompt_ids_tensor, response_ids])
 
         return RolloutResult(
@@ -323,6 +327,7 @@ class MultiTurnExecutor:
             prompt_text=initial_prompt,
             prompt_len=len(prompt_ids_tensor),
             response_len=len(response_ids),
+            response_mask=response_mask,
         )
 
     def _make_empty_rollout(self, task: TaskInstance, tokenizer) -> RolloutResult:
@@ -348,20 +353,36 @@ class MultiTurnExecutor:
             prompt_text=prompt_text,
             prompt_len=len(prompt_ids),
             response_len=1,
+            response_mask=torch.ones(1, dtype=torch.float32),
         )
 
-    def _compute_ref_logprobs(self, rollouts: list[RolloutResult]) -> list[Tensor]:
+    def _compute_ref_logprobs(self, rollouts: list[RolloutResult], tokenizer) -> list[Tensor]:
         """Compute reference model log-probs for each rollout."""
         if self.ref_model is None:
             return [torch.zeros_like(r.old_log_probs) for r in rollouts]
 
-        input_ids = pad_sequences([r.full_ids for r in rollouts], pad_value=0)
+        pad_id = tokenizer.pad_token_id if tokenizer and tokenizer.pad_token_id is not None else 0
+        input_ids = pad_sequences([r.full_ids for r in rollouts], pad_value=pad_id)
         input_ids = input_ids.to(self.ref_model.device)
-        attention_mask = (input_ids != 0).long().to(self.ref_model.device)
-        response_ids = pad_sequences([r.response_ids for r in rollouts], pad_value=0)
+        attention_mask = (input_ids != pad_id).long().to(self.ref_model.device)
+        response_ids = pad_sequences([r.response_ids for r in rollouts], pad_value=pad_id)
         response_ids = response_ids.to(self.ref_model.device)
+        response_mask = pad_sequences(
+            [
+                r.response_mask
+                if r.response_mask is not None
+                else torch.ones(r.response_len, dtype=torch.float32)
+                for r in rollouts
+            ],
+            pad_value=0.0,
+        ).to(self.ref_model.device)
 
-        ref_lp = self.ref_model.forward_logprobs(input_ids, attention_mask, response_ids)
+        ref_lp = self.ref_model.forward_logprobs(
+            input_ids,
+            attention_mask,
+            response_ids,
+            response_mask=response_mask,
+        )
 
         result = []
         for i, r in enumerate(rollouts):

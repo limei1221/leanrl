@@ -21,6 +21,7 @@ class RolloutResult:
     prompt_text: str
     prompt_len: int
     response_len: int
+    response_mask: Optional[Tensor] = None
 
 
 @dataclass
@@ -111,9 +112,13 @@ def build_experience_from_rollouts(
     old_log_probs = pad_sequences([r.old_log_probs for r in rollouts], pad_value=0.0)
     ref_log_probs = pad_sequences(ref_log_probs_list, pad_value=0.0)
 
-    response_mask = torch.zeros_like(response_ids, dtype=torch.float32)
-    for i, r in enumerate(rollouts):
-        response_mask[i, : r.response_len] = 1.0
+    response_masks = []
+    for r in rollouts:
+        if r.response_mask is not None:
+            response_masks.append(r.response_mask.to(dtype=torch.float32))
+        else:
+            response_masks.append(torch.ones(r.response_len, dtype=torch.float32))
+    response_mask = pad_sequences(response_masks, pad_value=0.0)
 
     return Experience(
         prompt_ids=prompt_ids,

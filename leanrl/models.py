@@ -14,6 +14,39 @@ from leanrl.utils.config import ModelConfig, TrainingConfig, InfraConfig
 from leanrl.utils.logging import logger
 
 
+def _extract_response_logprobs(
+    per_token_lp: Tensor,
+    attention_mask: Tensor,
+    response_mask: Tensor,
+) -> Tensor:
+    """Align shifted log-probs to response tokens for variable prompt lengths.
+
+    Args:
+        per_token_lp: (B, T-1), log-prob of input_ids[:, 1:].
+        attention_mask: (B, T), 1 for non-pad tokens.
+        response_mask: (B, R), 1 for response tokens to train on.
+
+    Returns:
+        (B, R) response log-probs, left-aligned to response_mask.
+    """
+    batch_size = per_token_lp.shape[0]
+    max_resp_len = response_mask.shape[1]
+
+    seq_lens = attention_mask.long().sum(dim=1)
+    resp_lens = response_mask.long().sum(dim=1)
+    prompt_lens = seq_lens - resp_lens
+
+    resp_lp = per_token_lp.new_zeros((batch_size, max_resp_len))
+    for i in range(batch_size):
+        resp_len_i = int(resp_lens[i].item())
+        if resp_len_i <= 0:
+            continue
+        start = max(int(prompt_lens[i].item()) - 1, 0)
+        end = start + resp_len_i
+        resp_lp[i, :resp_len_i] = per_token_lp[i, start:end]
+    return resp_lp
+
+
 def get_deepspeed_config(
     infra: InfraConfig,
     training: TrainingConfig,
@@ -146,10 +179,7 @@ class PolicyModel:
         log_probs = F.log_softmax(shift_logits, dim=-1)
         per_token_lp = log_probs.gather(dim=-1, index=shift_labels.unsqueeze(-1)).squeeze(-1)
 
-        # Extract response portion: last resp_len tokens of the shifted sequence
-        resp_len = response_ids.shape[1]
-        resp_lp = per_token_lp[:, -resp_len:]
-        return resp_lp
+        return _extract_response_logprobs(per_token_lp, attention_mask, response_mask)
 
     def train_step(self, loss: Tensor) -> dict:
         """Run a single backward + optimizer step via DeepSpeed."""
@@ -204,10 +234,15 @@ class ReferenceModel:
         input_ids: Tensor,
         attention_mask: Tensor,
         response_ids: Tensor,
+        response_mask: Optional[Tensor] = None,
     ) -> Tensor:
         """Compute per-token log-probs for the response portion."""
         input_ids = input_ids.to(self.device)
         attention_mask = attention_mask.to(self.device)
+        if response_mask is None:
+            # Backward-compatible fallback for callers that do not pass a mask.
+            response_mask = (response_ids != 0).float()
+        response_mask = response_mask.to(self.device)
 
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
         logits = outputs.logits
@@ -218,5 +253,4 @@ class ReferenceModel:
         log_probs = F.log_softmax(shift_logits, dim=-1)
         per_token_lp = log_probs.gather(dim=-1, index=shift_labels.unsqueeze(-1)).squeeze(-1)
 
-        resp_len = response_ids.shape[1]
-        return per_token_lp[:, -resp_len:]
+        return _extract_response_logprobs(per_token_lp, attention_mask, response_mask)
