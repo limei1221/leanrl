@@ -217,7 +217,8 @@ class GRPOTrainer:
         cfg = self.config
         device = torch.device("cuda:0")
         exp = experience.to(device)
-        all_metrics = {}
+        all_metrics: dict[str, float] = {}
+        num_updates = 0
 
         for ppo_epoch in range(cfg.training.num_ppo_epochs):
             n = len(exp)
@@ -229,19 +230,18 @@ class GRPOTrainer:
 
                 mb_input_ids = exp.input_ids[idx]
                 mb_attn_mask = exp.attention_mask[idx]
-                mb_response_ids = exp.response_ids[idx]
                 mb_old_lp = exp.old_log_probs[idx]
                 mb_ref_lp = exp.ref_log_probs[idx]
                 mb_advantages = exp.advantages[idx]
                 mb_resp_mask = exp.response_mask[idx]
+                mb_resp_lens = exp.response_lengths[idx]
 
-                # Forward pass to get current log-probs
-                cur_lp = self.policy.forward_logprobs_from_experience(
+                # Forward pass to get current log-probs and entropy
+                cur_lp, cur_entropy = self.policy.forward_logprobs_from_experience(
                     input_ids=mb_input_ids,
                     attention_mask=mb_attn_mask,
-                    response_ids=mb_response_ids,
-                    response_mask=mb_resp_mask,
-                    pad_token_id=self.tokenizer.pad_token_id,
+                    response_lengths=mb_resp_lens,
+                    max_resp_len=mb_resp_mask.shape[1],
                 )
 
                 # Compute GRPO loss
@@ -254,13 +254,19 @@ class GRPOTrainer:
                     clip_range=cfg.grpo.clip_range,
                     kl_coef=cfg.grpo.kl_coef,
                     entropy_coef=cfg.grpo.entropy_coef,
+                    entropy=cur_entropy,
                 )
 
                 # Backward + step
                 step_info = self.policy.train_step(loss)
                 metrics.update(step_info)
-                all_metrics = metrics
 
+                for k, v in metrics.items():
+                    all_metrics[k] = all_metrics.get(k, 0.0) + v
+                num_updates += 1
+
+        if num_updates > 0:
+            all_metrics = {k: v / num_updates for k, v in all_metrics.items()}
         return all_metrics
 
     def _save_checkpoint(self, final: bool = False):

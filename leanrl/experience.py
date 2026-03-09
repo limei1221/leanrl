@@ -41,6 +41,7 @@ class Experience:
     rewards: Tensor             # (B*G,)
     advantages: Tensor          # (B*G,)
     response_mask: Tensor       # (B*G, max_resp_len) 1=model token, 0=pad/env
+    response_lengths: Tensor    # (B*G,) actual response lengths before padding
     labels: Optional[list[str]] = None
 
     def __len__(self) -> int:
@@ -57,6 +58,7 @@ class Experience:
             rewards=self.rewards.to(device),
             advantages=self.advantages.to(device),
             response_mask=self.response_mask.to(device),
+            response_lengths=self.response_lengths.to(device),
             labels=self.labels,
         )
 
@@ -105,10 +107,17 @@ def build_experience_from_rollouts(
     response_ids = pad_sequences([r.response_ids for r in rollouts], pad_value=pad_token_id)
     input_ids = pad_sequences([r.full_ids for r in rollouts], pad_value=pad_token_id)
 
-    max_seq_len = input_ids.shape[1]
-    attention_mask = (input_ids != pad_token_id).long()
+    # Build attention_mask from actual sequence lengths rather than token
+    # comparison, so that legitimate EOS tokens are not masked out when
+    # pad_token_id == eos_token_id.
+    response_lengths = torch.tensor([r.response_len for r in rollouts], dtype=torch.long)
+    seq_lengths = torch.tensor(
+        [r.prompt_len + r.response_len for r in rollouts], dtype=torch.long,
+    )
+    attention_mask = torch.zeros(input_ids.shape, dtype=torch.long)
+    for i, sl in enumerate(seq_lengths):
+        attention_mask[i, :sl] = 1
 
-    max_resp_len = response_ids.shape[1]
     old_log_probs = pad_sequences([r.old_log_probs for r in rollouts], pad_value=0.0)
     ref_log_probs = pad_sequences(ref_log_probs_list, pad_value=0.0)
 
@@ -130,6 +139,7 @@ def build_experience_from_rollouts(
         rewards=rewards,
         advantages=advantages,
         response_mask=response_mask,
+        response_lengths=response_lengths,
     )
 
 
@@ -170,4 +180,5 @@ class ExperienceBuffer:
                     rewards=exp_dev.rewards[idx],
                     advantages=exp_dev.advantages[idx],
                     response_mask=exp_dev.response_mask[idx],
+                    response_lengths=exp_dev.response_lengths[idx],
                 )
