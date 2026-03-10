@@ -118,8 +118,13 @@ def grpo_loss(
     clip_range: float = 0.2,
     kl_coef: float = 0.01,
     entropy_coef: float = 0.0,
+    entropy: Tensor | None = None,
 ) -> tuple[Tensor, dict[str, float]]:
     """Combined GRPO loss: policy loss + KL penalty + entropy bonus.
+
+    Args:
+        entropy: (B, T) pre-computed per-token entropy from the full
+            distribution.  Required when ``entropy_coef > 0``.
 
     Returns both the scalar loss and a dict of metrics for logging.
     """
@@ -129,11 +134,11 @@ def grpo_loss(
     loss = policy_loss + kl_coef * kl
 
     # Optional entropy bonus (encourages exploration)
-    if entropy_coef > 0:
-        entropy = -(log_probs.exp() * log_probs * mask).sum() / mask.sum().clamp(min=1)
-        loss = loss - entropy_coef * entropy
+    if entropy_coef > 0 and entropy is not None:
+        mean_entropy = (entropy * mask).sum() / mask.sum().clamp(min=1)
+        loss = loss - entropy_coef * mean_entropy
     else:
-        entropy = torch.tensor(0.0, device=loss.device)
+        mean_entropy = torch.tensor(0.0, device=loss.device)
 
     # Approximate clip fraction for monitoring
     with torch.no_grad():
@@ -144,7 +149,7 @@ def grpo_loss(
     metrics = {
         "policy_loss": policy_loss.item(),
         "kl": kl.item(),
-        "entropy": entropy.item(),
+        "entropy": mean_entropy.item(),
         "clip_fraction": clip_frac.item(),
         "total_loss": loss.item(),
     }

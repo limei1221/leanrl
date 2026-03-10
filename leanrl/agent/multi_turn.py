@@ -364,25 +364,27 @@ class MultiTurnExecutor:
         pad_id = tokenizer.pad_token_id if tokenizer and tokenizer.pad_token_id is not None else 0
         input_ids = pad_sequences([r.full_ids for r in rollouts], pad_value=pad_id)
         input_ids = input_ids.to(self.ref_model.device)
-        attention_mask = (input_ids != pad_id).long().to(self.ref_model.device)
-        response_ids = pad_sequences([r.response_ids for r in rollouts], pad_value=pad_id)
-        response_ids = response_ids.to(self.ref_model.device)
-        response_mask = pad_sequences(
-            [
-                r.response_mask
-                if r.response_mask is not None
-                else torch.ones(r.response_len, dtype=torch.float32)
-                for r in rollouts
-            ],
-            pad_value=0.0,
-        ).to(self.ref_model.device)
+
+        # Build attention_mask from actual lengths so EOS tokens are not
+        # masked out when pad_token_id == eos_token_id.
+        response_lengths = torch.tensor(
+            [r.response_len for r in rollouts], dtype=torch.long,
+        )
+        seq_lengths = torch.tensor(
+            [r.prompt_len + r.response_len for r in rollouts], dtype=torch.long,
+        )
+        attention_mask = torch.zeros(input_ids.shape, dtype=torch.long)
+        for i, sl in enumerate(seq_lengths):
+            attention_mask[i, :sl] = 1
+        attention_mask = attention_mask.to(self.ref_model.device)
+
+        max_resp_len = max(r.response_len for r in rollouts)
 
         ref_lp = self.ref_model.forward_logprobs(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            response_ids=response_ids,
-            response_mask=response_mask,
-            pad_token_id=pad_id,
+            response_lengths=response_lengths,
+            max_resp_len=max_resp_len,
         )
 
         result = []

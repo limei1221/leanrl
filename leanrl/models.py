@@ -17,34 +17,33 @@ from leanrl.utils.logging import logger
 def _extract_response_logprobs(
     per_token_lp: Tensor,
     attention_mask: Tensor,
-    response_ids: Tensor,
-    response_mask: Tensor,
-    pad_token_id: int,
+    response_lengths: Tensor,
+    max_resp_len: int,
 ) -> Tensor:
     """Align shifted log-probs to response tokens for variable prompt lengths.
 
+    Uses explicit ``response_lengths`` instead of comparing token ids with
+    pad_token_id, which breaks when pad_token_id == eos_token_id.
+
     Args:
-        per_token_lp: (B, T-1), log-prob of input_ids[:, 1:].
+        per_token_lp: (B, T-1), per-position values from shifted logits.
         attention_mask: (B, T), 1 for non-pad tokens.
-        response_ids: (B, R), padded response tokens (model + observations).
-        response_mask: (B, R), 1 for model tokens to train on, 0 otherwise.
-        pad_token_id: tokenizer pad token id used for padding.
+        response_lengths: (B,) actual response lengths before padding.
+        max_resp_len: output response dimension R.
 
     Returns:
-        (B, R) response log-probs, aligned to the response segment and
-        left-aligned within the max response length.
+        (B, R) values aligned to the response segment and left-aligned
+        within the max response length.
     """
     batch_size = per_token_lp.shape[0]
-    max_resp_len = response_mask.shape[1]
     max_seq_minus1 = per_token_lp.shape[1]
 
     seq_lens = attention_mask.long().sum(dim=1)
-    resp_lens = (response_ids != pad_token_id).long().sum(dim=1)
-    prompt_lens = seq_lens - resp_lens
+    prompt_lens = seq_lens - response_lengths
 
     resp_lp = per_token_lp.new_zeros((batch_size, max_resp_len))
     for i in range(batch_size):
-        resp_len_i = int(resp_lens[i].item())
+        resp_len_i = int(response_lengths[i].item())
         if resp_len_i <= 0:
             continue
 
@@ -177,14 +176,14 @@ class PolicyModel:
         self,
         input_ids: Tensor,
         attention_mask: Tensor,
-        response_ids: Tensor,
-        response_mask: Tensor,
-        pad_token_id: int,
-    ) -> Tensor:
-        """Compute log-probs aligned with response_ids using the response_mask.
+        response_lengths: Tensor,
+        max_resp_len: int,
+    ) -> tuple[Tensor, Tensor]:
+        """Compute log-probs and entropy aligned to response tokens.
 
-        Handles variable-length prompts by using the full input_ids and
-        extracting log-probs only where response_mask=1.
+        Returns:
+            log_probs: (B, R) per-token log-probs for response tokens.
+            entropy: (B, R) per-token entropy from the full distribution.
         """
         outputs = self.engine(input_ids=input_ids, attention_mask=attention_mask)
         logits = outputs.logits  # (B, T, V)
@@ -193,16 +192,27 @@ class PolicyModel:
         shift_logits = logits[:, :-1, :]
         shift_labels = input_ids[:, 1:]
 
-        log_probs = F.log_softmax(shift_logits, dim=-1)
-        per_token_lp = log_probs.gather(dim=-1, index=shift_labels.unsqueeze(-1)).squeeze(-1)
+        log_probs_full = F.log_softmax(shift_logits, dim=-1)
+        per_token_lp = log_probs_full.gather(
+            dim=-1, index=shift_labels.unsqueeze(-1),
+        ).squeeze(-1)
 
-        return _extract_response_logprobs(
+        # Per-token entropy: H = -sum_v p(v) * log p(v)
+        per_token_entropy = -(log_probs_full.exp() * log_probs_full).sum(dim=-1)
+
+        resp_lp = _extract_response_logprobs(
             per_token_lp=per_token_lp,
             attention_mask=attention_mask,
-            response_ids=response_ids,
-            response_mask=response_mask,
-            pad_token_id=pad_token_id,
+            response_lengths=response_lengths,
+            max_resp_len=max_resp_len,
         )
+        resp_entropy = _extract_response_logprobs(
+            per_token_lp=per_token_entropy,
+            attention_mask=attention_mask,
+            response_lengths=response_lengths,
+            max_resp_len=max_resp_len,
+        )
+        return resp_lp, resp_entropy
 
     def train_step(self, loss: Tensor) -> dict:
         """Run a single backward + optimizer step via DeepSpeed."""
@@ -265,17 +275,13 @@ class ReferenceModel:
         self,
         input_ids: Tensor,
         attention_mask: Tensor,
-        response_ids: Tensor,
-        response_mask: Optional[Tensor] = None,
-        pad_token_id: int = 0,
+        response_lengths: Tensor,
+        max_resp_len: int,
     ) -> Tensor:
         """Compute per-token log-probs for the response portion."""
         input_ids = input_ids.to(self.device)
         attention_mask = attention_mask.to(self.device)
-        if response_mask is None:
-            # Backward-compatible fallback for callers that do not pass a mask.
-            response_mask = (response_ids != 0).float()
-        response_mask = response_mask.to(self.device)
+        response_lengths = response_lengths.to(self.device)
 
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
         logits = outputs.logits
@@ -289,7 +295,6 @@ class ReferenceModel:
         return _extract_response_logprobs(
             per_token_lp=per_token_lp,
             attention_mask=attention_mask,
-            response_ids=response_ids,
-            response_mask=response_mask,
-            pad_token_id=pad_token_id,
+            response_lengths=response_lengths,
+            max_resp_len=max_resp_len,
         )
