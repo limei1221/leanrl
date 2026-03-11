@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+import numpy as np
 import ray
 import torch
 from torch import Tensor
@@ -23,9 +24,30 @@ class WeightUpdateExtension:
     """
 
     def update_model_weights(self, state_dict: dict) -> dict:
-        """Load a state dict into the vLLM model in-place."""
+        """Load a state dict into the vLLM model in-place.
+
+        Sanitizes state_dict: Ray/vLLM serialization can convert tensors to lists
+        when passing through collective_rpc. We convert any list values back to
+        tensors before load_state_dict.
+        """
         model = self.model_runner.model
-        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        sanitized = {}
+        for k, v in state_dict.items():
+            if isinstance(v, torch.Tensor):
+                sanitized[k] = v
+            elif isinstance(v, list):
+                # Restore serialization-corrupted tensors (e.g. from Ray/vLLM)
+                arr = np.array(v)
+                t = torch.from_numpy(arr)
+                # vLLM models use bfloat16; ensure dtype matches
+                if t.dtype in (torch.float32, torch.float64):
+                    t = t.to(torch.bfloat16)
+                sanitized[k] = t
+            elif isinstance(v, np.ndarray):
+                sanitized[k] = torch.from_numpy(v)
+            else:
+                continue
+        missing, unexpected = model.load_state_dict(sanitized, strict=False)
         return {"missing": len(missing), "unexpected": len(unexpected)}
 
 
