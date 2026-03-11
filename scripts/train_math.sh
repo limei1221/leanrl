@@ -14,24 +14,21 @@ echo "Config: $CONFIG"
 echo "GPUs available: $(nvidia-smi -L 2>/dev/null | wc -l || echo 'N/A')"
 
 # Start Ray head on GPU 1 (vLLM engine) if not already running
-if ! ray status &>/dev/null; then
-    echo "Starting Ray head node on GPU 1 for vLLM..."
-    CUDA_VISIBLE_DEVICES=1 ray start --head --num-gpus=1
-    STARTED_RAY=1
-else
-    echo "Ray already running."
-    STARTED_RAY=0
+if ray status &>/dev/null; then
+    echo "Stopping Ray..."
+    ray stop
 fi
+
+echo "Starting Ray head node on GPU 1 for vLLM..."
+CUDA_VISIBLE_DEVICES=1 ray start --head --num-gpus=1
 
 echo "Starting GRPO math training on GPU 0..."
 CUDA_VISIBLE_DEVICES=0 \
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 python -m leanrl.trainer --config "$CONFIG"
 
-# Optionally stop Ray if we started it
-if [ "$STARTED_RAY" -eq 1 ]; then
-    echo "Stopping Ray..."
-    ray stop
-fi
+# Stop Ray
+echo "Stopping Ray..."
+ray stop
 
 echo "=== Training complete ==="

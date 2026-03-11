@@ -16,6 +16,7 @@ dependencies = [
     "vllm>=0.6.0",
     "ray>=2.38",
     "deepspeed>=0.15",
+    "mpi4py",
     "datasets",
     "wandb",
     "docker",

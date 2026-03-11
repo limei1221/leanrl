@@ -15,7 +15,9 @@ LeanRL implements **GRPO (Group Relative Policy Optimization)** for both math ve
 ## Quick Start
 
 ```bash
-# Install
+# Install (editable + dev deps)
+# On a fresh GPU machine, system MPI libraries are required by DeepSpeed at runtime:
+#   apt-get update && apt-get install -y libopenmpi-dev openmpi-bin
 pip install -e ".[dev]"
 
 # 2-GPU setup (recommended)

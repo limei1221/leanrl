@@ -105,42 +105,48 @@ class SingleTurnExecutor:
         return experience
 
     def _compute_ref_logprobs(self, rollouts: list[RolloutResult], tokenizer) -> list[Tensor]:
-        """Compute reference model log-probs for each rollout."""
+        """Compute reference model log-probs for each rollout, in mini-batches
+        to avoid OOM from large logits tensors (batch * seq_len * vocab_size)."""
         if self.ref_model is None:
             return [torch.zeros_like(r.old_log_probs) for r in rollouts]
 
         from leanrl.experience import pad_sequences
 
         pad_id = tokenizer.pad_token_id if tokenizer and tokenizer.pad_token_id is not None else 0
-        input_ids = pad_sequences(
-            [r.full_ids for r in rollouts],
-            pad_value=pad_id,
-        ).to(self.ref_model.device)
+        mini_bs = self.config.training.micro_batch_size
 
-        # Build attention_mask from actual lengths so EOS tokens are not
-        # masked out when pad_token_id == eos_token_id.
-        response_lengths = torch.tensor(
-            [r.response_len for r in rollouts], dtype=torch.long,
-        )
-        seq_lengths = torch.tensor(
-            [r.prompt_len + r.response_len for r in rollouts], dtype=torch.long,
-        )
-        attention_mask = torch.zeros(input_ids.shape, dtype=torch.long)
-        for i, sl in enumerate(seq_lengths):
-            attention_mask[i, :sl] = 1
-        attention_mask = attention_mask.to(self.ref_model.device)
+        result = [None] * len(rollouts)
+        for start in range(0, len(rollouts), mini_bs):
+            chunk = rollouts[start : start + mini_bs]
 
-        max_resp_len = max(r.response_len for r in rollouts)
+            input_ids = pad_sequences(
+                [r.full_ids for r in chunk],
+                pad_value=pad_id,
+            ).to(self.ref_model.device)
 
-        ref_lp = self.ref_model.forward_logprobs(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            response_lengths=response_lengths,
-            max_resp_len=max_resp_len,
-        )
+            # Build attention_mask from actual lengths so EOS tokens are not
+            # masked out when pad_token_id == eos_token_id.
+            response_lengths = torch.tensor(
+                [r.response_len for r in chunk], dtype=torch.long,
+            )
+            seq_lengths = torch.tensor(
+                [r.prompt_len + r.response_len for r in chunk], dtype=torch.long,
+            )
+            attention_mask = torch.zeros(input_ids.shape, dtype=torch.long)
+            for i, sl in enumerate(seq_lengths):
+                attention_mask[i, :sl] = 1
+            attention_mask = attention_mask.to(self.ref_model.device)
 
-        # Split back to per-rollout tensors
-        result = []
-        for i, r in enumerate(rollouts):
-            result.append(ref_lp[i, : r.response_len].cpu())
+            max_resp_len = max(r.response_len for r in chunk)
+
+            ref_lp = self.ref_model.forward_logprobs(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                response_lengths=response_lengths,
+                max_resp_len=max_resp_len,
+            )
+
+            for j, r in enumerate(chunk):
+                result[start + j] = ref_lp[j, : r.response_len].cpu()
+
         return result

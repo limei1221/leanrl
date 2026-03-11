@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import io
 from typing import Optional
 
-import numpy as np
 import ray
 import torch
 from torch import Tensor
@@ -23,31 +23,20 @@ class WeightUpdateExtension:
     via ``LLM.collective_rpc()``.
     """
 
-    def update_model_weights(self, state_dict: dict) -> dict:
+    def update_model_weights(self, state_dict_bytes: bytes) -> dict:
         """Load a state dict into the vLLM model in-place.
 
-        Sanitizes state_dict: Ray/vLLM serialization can convert tensors to lists
-        when passing through collective_rpc. We convert any list values back to
-        tensors before load_state_dict.
+        Receives the state dict pre-serialized as bytes (via torch.save) to
+        survive vLLM's collective_rpc msgpack round-trip. Plain bytes is a
+        first-class msgpack type, whereas torch.Tensor is encoded as a
+        (dtype, shape, aux_buffer_index) tuple whose aux buffer is cleared
+        before this method is called, making reconstruction impossible.
         """
+        state_dict = torch.load(
+            io.BytesIO(state_dict_bytes), map_location="cpu", weights_only=True
+        )
         model = self.model_runner.model
-        sanitized = {}
-        for k, v in state_dict.items():
-            if isinstance(v, torch.Tensor):
-                sanitized[k] = v
-            elif isinstance(v, list):
-                # Restore serialization-corrupted tensors (e.g. from Ray/vLLM)
-                arr = np.array(v)
-                t = torch.from_numpy(arr)
-                # vLLM models use bfloat16; ensure dtype matches
-                if t.dtype in (torch.float32, torch.float64):
-                    t = t.to(torch.bfloat16)
-                sanitized[k] = t
-            elif isinstance(v, np.ndarray):
-                sanitized[k] = torch.from_numpy(v)
-            else:
-                continue
-        missing, unexpected = model.load_state_dict(sanitized, strict=False)
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
         return {"missing": len(missing), "unexpected": len(unexpected)}
 
 
@@ -185,10 +174,17 @@ class RolloutEngine:
         update to all vLLM workers through the ``WeightUpdateExtension``.
         This is stable across vLLM V0/V1 engines and single/multi-process
         executor backends.
+
+        The state dict is pre-serialized to bytes via torch.save so that it
+        survives vLLM's msgpack round-trip as a plain bytes object. Passing
+        tensors directly fails because their aux-buffer references are cleared
+        before the worker method is invoked.
         """
+        buf = io.BytesIO()
+        torch.save(state_dict, buf)
         results = self.llm.collective_rpc(
             "update_model_weights",
-            args=(state_dict,),
+            args=(buf.getvalue(),),
         )
         for result in results:
             if result["missing"] or result["unexpected"]:

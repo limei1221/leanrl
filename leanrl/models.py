@@ -155,12 +155,17 @@ class PolicyModel:
         attention_mask: Tensor,
         response_lengths: Tensor,
         max_resp_len: int,
+        compute_entropy: bool = True,
     ) -> tuple[Tensor, Tensor]:
-        """Compute log-probs and entropy aligned to response tokens.
+        """Compute log-probs and (optionally) entropy aligned to response tokens.
+
+        Args:
+            compute_entropy: if False, skip the expensive (B, T, V) entropy
+                computation and return zeros.  Set to False when entropy_coef=0.
 
         Returns:
             log_probs: (B, R) per-token log-probs for response tokens.
-            entropy: (B, R) per-token entropy from the full distribution.
+            entropy: (B, R) per-token entropy, or zeros if compute_entropy=False.
         """
         outputs = self.engine(input_ids=input_ids, attention_mask=attention_mask)
         logits = outputs.logits  # (B, T, V)
@@ -174,8 +179,14 @@ class PolicyModel:
             dim=-1, index=shift_labels.unsqueeze(-1),
         ).squeeze(-1)
 
-        # Per-token entropy: H = -sum_v p(v) * log p(v)
-        per_token_entropy = -(log_probs_full.exp() * log_probs_full).sum(dim=-1)
+        # log_softmax backward only needs its output, not input — free early.
+        del outputs, logits, shift_logits
+
+        if compute_entropy:
+            # Per-token entropy: H = -sum_v p(v) * log p(v)
+            per_token_entropy = -(log_probs_full.exp() * log_probs_full).sum(dim=-1)
+        else:
+            per_token_entropy = per_token_lp.new_zeros(per_token_lp.shape)
 
         resp_lp = _extract_response_logprobs(
             per_token_lp=per_token_lp,

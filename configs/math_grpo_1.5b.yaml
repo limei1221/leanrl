@@ -6,14 +6,14 @@ model:
   trust_remote_code: true
 
 grpo:
-  n_samples_per_prompt: 4      # was 8
+  n_samples_per_prompt: 8
   kl_coef: 0.01
   clip_range: 0.2
   max_grad_norm: 1.0
 
 rollout:
-  rollout_batch_size: 8        # was 16
-  max_new_tokens: 256          # was 512
+  rollout_batch_size: 16
+  max_new_tokens: 512
   temperature: 0.7
   top_p: 0.95
 
@@ -21,8 +21,8 @@ training:
   lr: 5.0e-7
   weight_decay: 0.01
   warmup_ratio: 0.03
-  train_batch_size: 4          # was 8
-  micro_batch_size: 1          # was 2
+  train_batch_size: 32
+  micro_batch_size: 4
   num_epochs: 1
   save_steps: 50
   logging_steps: 1
@@ -39,16 +39,16 @@ data:
 
 infra:
   vllm_num_engines: 1
-  vllm_gpu_memory_utilization: 0.8    # was 0.85
-  vllm_enforce_eager: true
-  vllm_enable_sleep: true
+  vllm_gpu_memory_utilization: 0.90
+  vllm_enforce_eager: false
+  vllm_enable_sleep: false
   vllm_tensor_parallel_size: 1
   deepspeed_stage: 2
-  offload_optimizer: true             # was false
+  offload_optimizer: true
   ray_address: "auto"
 
 logging:
-  use_wandb: false
+  use_wandb: true
   wandb_project: leanrl-math
   output_dir: ./output/math_grpo_1.5b
   log_dir: ./logs/math_grpo_1.5b

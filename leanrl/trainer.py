@@ -71,7 +71,7 @@ class GRPOTrainer:
         logger.info("Policy model loaded")
 
         # Reference model (frozen, shares GPU with policy)
-        device = torch.device("cuda:0")
+        device = torch.device("cuda")
         self.ref_model = ReferenceModel(cfg.model, device=device)
         logger.info("Reference model loaded")
 
@@ -188,7 +188,10 @@ class GRPOTrainer:
                     pass
 
                 state_dict = self.policy.get_state_dict_for_vllm()
-                ray.get(self.rollout_engine.update_weights.remote(state_dict))
+                future = self.rollout_engine.update_weights.remote(state_dict)
+                del state_dict  # Ray serializes synchronously before returning the future,
+                                # so the trainer-side copy can be freed immediately
+                ray.get(future)
 
                 # --- Logging ---
                 step_time = time.time() - step_start
@@ -215,7 +218,7 @@ class GRPOTrainer:
     def _train_on_experience(self, experience: Experience) -> dict:
         """Run multiple PPO epochs over the experience batch."""
         cfg = self.config
-        device = torch.device("cuda:0")
+        device = torch.device("cuda")
         exp = experience.to(device)
         all_metrics: dict[str, float] = {}
         num_updates = 0
@@ -242,6 +245,7 @@ class GRPOTrainer:
                     attention_mask=mb_attn_mask,
                     response_lengths=mb_resp_lens,
                     max_resp_len=mb_resp_mask.shape[1],
+                    compute_entropy=(cfg.grpo.entropy_coef > 0),
                 )
 
                 # Compute GRPO loss
