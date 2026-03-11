@@ -63,11 +63,12 @@ def compute_swe_reward(
             return 0.0, info
 
         test_results = parse_pytest_results(result.stdout + result.stderr)
-        passed = sum(1 for s in test_results.values() if s == "passed")
+        passed = sum(1 for t in task.fail_to_pass if test_results.get(t) == "passed")
         info["fail_to_pass_passed"] = passed
 
-        if passed < len(task.fail_to_pass):
-            return 0.0, info
+        for test in task.fail_to_pass:
+            if test_results.get(test) != "passed":
+                return 0.0, info
 
     # Run PASS_TO_PASS tests (regression check)
     if task.pass_to_pass:
@@ -77,11 +78,12 @@ def compute_swe_reward(
             return 0.0, info
 
         test_results = parse_pytest_results(result.stdout + result.stderr)
-        passed = sum(1 for s in test_results.values() if s == "passed")
+        passed = sum(1 for t in task.pass_to_pass if test_results.get(t) == "passed")
         info["pass_to_pass_passed"] = passed
 
-        if passed < len(task.pass_to_pass):
-            return 0.0, info
+        for test in task.pass_to_pass:
+            if test_results.get(test) != "passed":
+                return 0.0, info
 
     return 1.0, info
 

@@ -149,29 +149,6 @@ class PolicyModel:
             config=ds_config,
         )
 
-    def forward_logprobs(self, input_ids: Tensor, attention_mask: Tensor, response_start: int) -> Tensor:
-        """Compute per-token log-probabilities for the response portion.
-
-        Args:
-            input_ids: (B, T) full sequence (prompt + response).
-            attention_mask: (B, T).
-            response_start: index where the response begins.
-
-        Returns:
-            log_probs: (B, T - response_start) per-token log probs for response.
-        """
-        with torch.no_grad() if not self.model.training else torch.enable_grad():
-            outputs = self.engine(input_ids=input_ids, attention_mask=attention_mask)
-            logits = outputs.logits  # (B, T, V)
-
-        # Shift: logits[t] predicts token[t+1]
-        resp_logits = logits[:, response_start - 1 : -1, :]  # (B, resp_len, V)
-        resp_tokens = input_ids[:, response_start:]            # (B, resp_len)
-
-        log_probs = F.log_softmax(resp_logits, dim=-1)
-        per_token_lp = log_probs.gather(dim=-1, index=resp_tokens.unsqueeze(-1)).squeeze(-1)
-        return per_token_lp
-
     def forward_logprobs_from_experience(
         self,
         input_ids: Tensor,

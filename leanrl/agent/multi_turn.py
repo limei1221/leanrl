@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import re
 
-import ray
 import torch
 from torch import Tensor
 
@@ -241,6 +240,8 @@ class MultiTurnExecutor:
             )
         else:
             conversation = initial_prompt
+
+        import ray
 
         all_response_ids: list[int] = []
         all_log_probs: list[float] = []

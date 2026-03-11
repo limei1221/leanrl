@@ -125,8 +125,9 @@ class DockerSandbox:
         """Write content to a file inside the container."""
         import base64
 
+        import shlex
         encoded = base64.b64encode(content.encode()).decode()
-        cmd = f"echo '{encoded}' | base64 -d > {path}"
+        cmd = f"echo '{encoded}' | base64 -d > {shlex.quote(path)}"
         return self.execute(cmd)
 
     def read_file(self, path: str) -> SandboxResult:
