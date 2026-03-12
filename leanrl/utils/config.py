@@ -84,7 +84,6 @@ class LoggingConfig:
     wandb_project: str = "leanrl"
     wandb_run_name: Optional[str] = None
     output_dir: str = "./output"
-    log_dir: str = "./logs"
 
 
 @dataclass

@@ -56,7 +56,6 @@ infra:
   deepspeed_stage: 2
 
 logging:
-  use_wandb: false
+  use_wandb: true
   wandb_project: leanrl-swe
   output_dir: ./output/swe_grpo_1.5b
-  log_dir: ./logs/swe_grpo_1.5b
