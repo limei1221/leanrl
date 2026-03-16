@@ -225,8 +225,52 @@ class PolicyModel:
         logger.info(f"HF model saved to {path}")
 
     def get_state_dict_for_vllm(self) -> dict:
-        """Extract state dict for syncing to vLLM engine."""
-        return {k: v.cpu() for k, v in self.engine.module.state_dict().items()}
+        """Extract state dict for syncing to vLLM engine.
+
+        vLLM's Qwen2ForCausalLM merges Q/K/V projections into a single
+        qkv_proj (weight + bias) and gate/up projections into gate_up_proj,
+        so we transform the HuggingFace state dict keys accordingly.
+        """
+        sd = {k: v.cpu() for k, v in self.engine.module.state_dict().items()}
+
+        merged = {}
+        skip = set()
+        for key in sd:
+            if '.self_attn.q_proj.weight' in key:
+                prefix = key.split('.self_attn.q_proj.weight')[0]
+                q_w = sd[f'{prefix}.self_attn.q_proj.weight']
+                k_w = sd[f'{prefix}.self_attn.k_proj.weight']
+                v_w = sd[f'{prefix}.self_attn.v_proj.weight']
+                merged[f'{prefix}.self_attn.qkv_proj.weight'] = torch.cat([q_w, k_w, v_w], dim=0)
+                skip.update([
+                    f'{prefix}.self_attn.q_proj.weight',
+                    f'{prefix}.self_attn.k_proj.weight',
+                    f'{prefix}.self_attn.v_proj.weight',
+                ])
+                # merge biases if present
+                q_b_key = f'{prefix}.self_attn.q_proj.bias'
+                if q_b_key in sd:
+                    merged[f'{prefix}.self_attn.qkv_proj.bias'] = torch.cat([
+                        sd[f'{prefix}.self_attn.q_proj.bias'],
+                        sd[f'{prefix}.self_attn.k_proj.bias'],
+                        sd[f'{prefix}.self_attn.v_proj.bias'],
+                    ], dim=0)
+                    skip.update([
+                        f'{prefix}.self_attn.q_proj.bias',
+                        f'{prefix}.self_attn.k_proj.bias',
+                        f'{prefix}.self_attn.v_proj.bias',
+                    ])
+            elif '.mlp.gate_proj.weight' in key:
+                prefix = key.split('.mlp.gate_proj.weight')[0]
+                gate_w = sd[f'{prefix}.mlp.gate_proj.weight']
+                up_w = sd[f'{prefix}.mlp.up_proj.weight']
+                merged[f'{prefix}.mlp.gate_up_proj.weight'] = torch.cat([gate_w, up_w], dim=0)
+                skip.update([
+                    f'{prefix}.mlp.gate_proj.weight',
+                    f'{prefix}.mlp.up_proj.weight',
+                ])
+
+        return {**{k: v for k, v in sd.items() if k not in skip}, **merged}
 
 
 class ReferenceModel:

@@ -37,7 +37,11 @@ class WeightUpdateExtension:
         )
         model = self.model_runner.model
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
-        return {"missing": len(missing), "unexpected": len(unexpected)}
+        # Filter out non-trainable buffers (e.g. rotary embedding caches) from
+        # the missing count — these don't need to be synced from the policy.
+        param_names = {n for n, _ in model.named_parameters()}
+        missing_params = [k for k in missing if k in param_names]
+        return {"missing": len(missing_params), "unexpected": len(unexpected)}
 
 
 def extract_old_log_probs(
