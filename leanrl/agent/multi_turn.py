@@ -7,6 +7,7 @@ observe feedback -> generate next action -> ... -> final reward from test suite.
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import torch
 from torch import Tensor
@@ -134,8 +135,17 @@ class MultiTurnExecutor:
         all_rollouts: list[RolloutResult] = []
         all_rewards: list[float] = []
 
-        for task in tasks:
-            task_rollouts, task_rewards = self._run_task_rollouts(task, G, tokenizer)
+        max_workers = self.config.swe.max_concurrent_sandboxes
+        with ThreadPoolExecutor(max_workers=min(len(tasks), max_workers)) as executor:
+            futures = {
+                executor.submit(self._run_task_rollouts, task, G, tokenizer): i
+                for i, task in enumerate(tasks)
+            }
+            results: list[tuple] = [None] * len(tasks)
+            for future in as_completed(futures):
+                results[futures[future]] = future.result()
+
+        for task_rollouts, task_rewards in results:
             all_rollouts.extend(task_rollouts)
             all_rewards.extend(task_rewards)
 

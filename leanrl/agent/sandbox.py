@@ -6,6 +6,7 @@ for running code edits and test suites against SWE-bench task instances.
 
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional
@@ -59,8 +60,8 @@ class DockerSandbox:
     def image_name(self) -> str:
         if self.task.docker_image:
             return self.task.docker_image
-        repo_slug = self.task.repo.replace("/", "__")
-        return f"{self._image_prefix}/{repo_slug}:{self.task.instance_id}"
+        # swebench 4.x instance images: sweb.eval.x86_64.{instance_id}:latest
+        return f"sweb.eval.x86_64.{self.task.instance_id}:latest"
 
     def start(self):
         """Create and start the Docker container."""
@@ -137,15 +138,15 @@ class DockerSandbox:
     def apply_patch(self, patch: str) -> SandboxResult:
         """Apply a git diff patch inside the container."""
         self.write_file("/tmp/patch.diff", patch)
-        return self.execute("cd /repo && git apply /tmp/patch.diff")
+        return self.execute("cd /testbed && git apply /tmp/patch.diff")
 
     def run_tests(self, test_names: Optional[list[str]] = None) -> SandboxResult:
         """Run the test suite (or specific tests) inside the container."""
         if test_names:
             test_args = " ".join(test_names)
-            cmd = f"cd /repo && python -m pytest {test_args} -x --tb=short 2>&1"
+            cmd = f"cd /testbed && python -m pytest {test_args} -x --tb=short 2>&1"
         else:
-            cmd = "cd /repo && python -m pytest --tb=short 2>&1"
+            cmd = "cd /testbed && python -m pytest --tb=short 2>&1"
         return self.execute(cmd)
 
     def stop(self):
@@ -186,11 +187,13 @@ class SandboxPool:
         self.cpu_limit = cpu_limit
         self._executor = ThreadPoolExecutor(max_workers=max_concurrent)
         self._active: dict[str, DockerSandbox] = {}
+        self._lock = threading.Lock()
 
     def get_sandbox(self, task: TaskInstance) -> DockerSandbox:
         """Get or create a sandbox for a task instance."""
-        if task.instance_id in self._active:
-            return self._active[task.instance_id]
+        with self._lock:
+            if task.instance_id in self._active:
+                return self._active[task.instance_id]
 
         sandbox = DockerSandbox(
             task=task,
@@ -200,14 +203,16 @@ class SandboxPool:
             cpu_limit=self.cpu_limit,
         )
         sandbox.start()
-        self._active[task.instance_id] = sandbox
+        with self._lock:
+            self._active[task.instance_id] = sandbox
         return sandbox
 
     def release_sandbox(self, instance_id: str):
         """Stop and remove a sandbox."""
-        if instance_id in self._active:
-            self._active[instance_id].stop()
-            del self._active[instance_id]
+        with self._lock:
+            if instance_id in self._active:
+                self._active[instance_id].stop()
+                del self._active[instance_id]
 
     def release_all(self):
         """Stop all active sandboxes."""

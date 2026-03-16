@@ -6,14 +6,14 @@ model:
   trust_remote_code: true
 
 grpo:
-  n_samples_per_prompt: 4
+  n_samples_per_prompt: 2
   kl_coef: 0.01
   clip_range: 0.2
   max_grad_norm: 1.0
 
 rollout:
-  rollout_batch_size: 4
-  max_new_tokens: 1024
+  rollout_batch_size: 2
+  max_new_tokens: 512
   temperature: 0.7
   top_p: 0.95
 
@@ -25,17 +25,17 @@ training:
   micro_batch_size: 1
   num_epochs: 1
   max_steps: 200
-  save_steps: 50
+  save_steps: 10
   logging_steps: 1
   gradient_checkpointing: true
   num_ppo_epochs: 1
   seed: 42
 
 swe:
-  max_turns: 10
+  max_turns: 5
   docker_image_prefix: swebench
-  sandbox_timeout: 300
-  max_concurrent_sandboxes: 4
+  sandbox_timeout: 120
+  max_concurrent_sandboxes: 16
   sandbox_memory_limit: 4g
   sandbox_cpu_limit: 2.0
 
@@ -47,13 +47,14 @@ data:
   max_samples: 50
 
 infra:
-  num_gpus: 2
   vllm_num_engines: 1
-  vllm_gpu_memory_utilization: 0.85
-  vllm_enforce_eager: true
-  vllm_enable_sleep: true
+  vllm_gpu_memory_utilization: 0.90
+  vllm_enforce_eager: false
+  vllm_enable_sleep: false
   vllm_tensor_parallel_size: 1
   deepspeed_stage: 2
+  offload_optimizer: true
+  ray_address: "auto"
 
 logging:
   use_wandb: true

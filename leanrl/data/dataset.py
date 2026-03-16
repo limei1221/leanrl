@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
 from typing import Optional
 from torch.utils.data import Dataset, DataLoader
 from datasets import load_dataset
 
 from leanrl.utils.config import DataConfig
 from leanrl.utils.logging import logger
+
+# Marker fields that identify a SWE-bench dataset row (princeton-nlp/SWE-bench_Lite uses
+# uppercase FAIL_TO_PASS / PASS_TO_PASS stored as JSON-encoded strings)
+_SWE_MARKER_FIELDS = ("instance_id", "repo", "base_commit", "test_patch", "FAIL_TO_PASS", "PASS_TO_PASS")
 
 
 class PromptDataset(Dataset):
@@ -34,7 +39,21 @@ class PromptDataset(Dataset):
             self.prompts.append(prompt)
 
             if config.label_key and config.label_key in item:
-                self.labels.append(item[config.label_key])
+                # For SWE-bench rows, serialize full task metadata as JSON so
+                # MultiTurnExecutor._parse_tasks can access repo, base_commit, etc.
+                # princeton-nlp/SWE-bench_Lite uses uppercase FAIL_TO_PASS/PASS_TO_PASS
+                # stored as JSON-encoded strings; normalize to lowercase lists.
+                if all(f in item for f in _SWE_MARKER_FIELDS):
+                    self.labels.append(json.dumps({
+                        "instance_id": item["instance_id"],
+                        "repo": item["repo"],
+                        "base_commit": item["base_commit"],
+                        "test_patch": item["test_patch"],
+                        "fail_to_pass": json.loads(item["FAIL_TO_PASS"]) if isinstance(item["FAIL_TO_PASS"], str) else item["FAIL_TO_PASS"],
+                        "pass_to_pass": json.loads(item["PASS_TO_PASS"]) if isinstance(item["PASS_TO_PASS"], str) else item["PASS_TO_PASS"],
+                    }))
+                else:
+                    self.labels.append(item[config.label_key])
             else:
                 self.labels.append(None)
 
