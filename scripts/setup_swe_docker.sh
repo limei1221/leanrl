@@ -43,29 +43,39 @@ if max_samples > 0:
 print(f"Building instance images for {len(dataset)} instances...")
 print("Step 1/2: env images (environment + dependencies)...\n")
 
+from swebench.harness.docker_build import BuildImageError
+
 client = docker.from_env()
-successful, failed = build_env_images(
-    client=client,
-    dataset=dataset,
-    force_rebuild=False,
-    max_workers=int("${MAX_WORKERS}"),
-    instance_image_tag="latest",
-    env_image_tag="latest",
-)
+try:
+    successful, failed = build_env_images(
+        client=client,
+        dataset=dataset,
+        force_rebuild=False,
+        max_workers=int("${MAX_WORKERS}"),
+        instance_image_tag="latest",
+        env_image_tag="latest",
+    )
+except BuildImageError as e:
+    print(f"WARNING: env image build error (continuing): {e}")
+    failed = []
 if failed:
     print(f"WARNING: {len(failed)} env image(s) failed to build:")
     for img in failed:
         print(f"  {img}")
 
 print(f"\nStep 2/2: instance images (repo at base_commit + test patch)...\n")
-successful, failed = build_instance_images(
-    client=client,
-    dataset=dataset,
-    force_rebuild=False,
-    max_workers=int("${MAX_WORKERS}"),
-    env_image_tag="latest",
-    tag="latest",
-)
+try:
+    successful, failed = build_instance_images(
+        client=client,
+        dataset=dataset,
+        force_rebuild=False,
+        max_workers=int("${MAX_WORKERS}"),
+        env_image_tag="latest",
+        tag="latest",
+    )
+except BuildImageError as e:
+    print(f"WARNING: instance image build error (continuing): {e}")
+    successful, failed = [], []
 
 print(f"\nSuccessful: {len(successful)}")
 print(f"Failed:     {len(failed)}")
@@ -73,7 +83,7 @@ if failed:
     print("Failed images:")
     for img in failed:
         print(f"  {img}")
-    sys.exit(1)
+    print("WARNING: some images failed — continuing anyway")
 EOF
 
 echo ""

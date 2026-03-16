@@ -76,6 +76,30 @@ All settings live in YAML config files under `configs/`. See `leanrl/utils/confi
 | 0 | idle | Policy + Reference (DeepSpeed ZeRO-2) |
 | 1 | vLLM serving | vLLM sleeping, memory released |
 
+## Troubleshooting
+
+### SWE-bench Docker image build failures
+
+If `bash scripts/setup_swe_docker.sh` fails with errors like:
+
+```
+ERROR: Project file:///testbed uses a build backend that is missing the 'build_editable' hook
+```
+or
+```
+no such option: --no-use-pep517
+```
+
+these are caused by incompatibilities between the swebench package's hardcoded pip install commands and newer versions of pip. Fix by patching the installed swebench constants file:
+
+**File:** `$(python -c "import swebench; import os; print(os.path.dirname(swebench.__file__))")/harness/constants/python.py`
+
+1. **pylint `build_editable` error** — change the default pylint install command from `python -m pip install -e .` to `python -m pip install --no-build-isolation -e .` for all versions in `SPECS_PYLINT`, and add `setuptools>=64` to pip_packages for pylint 3.0–4.0.
+
+2. **scikit-learn `--no-use-pep517` error** — remove `--no-use-pep517` from the scikit-learn install commands in `SPECS_SKLEARN` (the flag was removed in pip 23+). Keep `--no-build-isolation`.
+
+After patching, re-run `bash scripts/setup_swe_docker.sh`.
+
 ## License
 
 Apache-2.0
