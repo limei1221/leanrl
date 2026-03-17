@@ -38,6 +38,7 @@ def evaluate(
     labels: list[str],
     batch_size: int,
     max_new_tokens: int,
+    device: str = "cuda",
 ) -> float:
     print(f"\nLoading {model_path} ...")
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, padding_side="left")
@@ -46,9 +47,8 @@ def evaluate(
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         torch_dtype=torch.bfloat16,
-        device_map="auto",
         trust_remote_code=True,
-    )
+    ).to(device)
     model.eval()
 
     prompts = [build_prompt(tokenizer, q) for q in questions]
@@ -64,7 +64,7 @@ def evaluate(
             padding=True,
             truncation=True,
             max_length=1024,
-        ).to(model.device)
+        ).to(device)
 
         with torch.no_grad():
             outputs = model.generate(
@@ -93,6 +93,7 @@ def main() -> None:
                         help="Number of test samples (default: full test set ~1319)")
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--max_new_tokens", type=int, default=512)
+    parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
     print("Loading GSM8K test split ...")
@@ -104,7 +105,7 @@ def main() -> None:
     labels = dataset["answer"]
     print(f"Evaluating on {len(questions)} problems.")
 
-    accuracy = evaluate(args.model_name_or_path, questions, labels, args.batch_size, args.max_new_tokens)
+    accuracy = evaluate(args.model_name_or_path, questions, labels, args.batch_size, args.max_new_tokens, args.device)
 
     print("\n" + "=" * 50)
     print(f"Model:    {args.model_name_or_path}")
