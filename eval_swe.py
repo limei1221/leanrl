@@ -296,10 +296,10 @@ def main() -> None:
                         help="Number of instances to evaluate (default: all)")
     parser.add_argument("--max_turns", type=int, default=5,
                         help="Max agent turns per instance (default: 5)")
-    parser.add_argument("--max_new_tokens", type=int, default=2048,
-                        help="Max tokens to generate per turn (default: 2048)")
-    parser.add_argument("--max_workers", type=int, default=2,
-                        help="Parallel sandbox workers (default: 2)")
+    parser.add_argument("--max_new_tokens", type=int, default=512,
+                        help="Max tokens to generate per turn (default: 512)")
+    parser.add_argument("--max_workers", type=int, default=4,
+                        help="Parallel sandbox workers (default: 4)")
     parser.add_argument("--sandbox_timeout", type=int, default=120,
                         help="Per-command sandbox timeout during trajectory in seconds (default: 120)")
     parser.add_argument("--test_timeout", type=int, default=300,
@@ -346,8 +346,22 @@ def main() -> None:
 
     if args.output_json:
         import json as _json
+        resolved = int(resolved)
+        total = int(len(tasks))
         with open(args.output_json, "w") as f:
-            _json.dump({"resolve_rate": resolve_rate, "results": results}, f, indent=2)
+            _json.dump(
+                {
+                    "model": args.model_name_or_path,
+                    "dataset": args.dataset,
+                    "split": args.split,
+                    "resolve_rate": resolve_rate,
+                    "resolved": resolved,
+                    "total": total,
+                    "results": results,
+                },
+                f,
+                indent=2,
+            )
         print(f"Per-instance results written to {args.output_json}")
 
 

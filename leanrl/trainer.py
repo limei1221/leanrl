@@ -69,6 +69,7 @@ class GRPOTrainer:
         )
         self.tokenizer = self.policy.tokenizer
         logger.info("Policy model loaded")
+        logger.info("Estimated total steps: %d", total_steps)
 
         # Reference model (frozen, shares GPU with policy)
         device = torch.device("cuda")
