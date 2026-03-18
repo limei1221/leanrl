@@ -29,14 +29,24 @@ ACTION_DONE = "done"
 def parse_action(text: str) -> tuple[str, str]:
     """Parse the model's output into an action type and content.
 
-    Expected formats:
-        <bash>command here</bash>
-        <edit path="file.py">new content</edit>
-        <done/>
+    Supports two formats:
+      1. Structured tags (used by GRPO-trained models):
+           <bash>command</bash>
+           <edit path="file.py">new content</edit>
+           <done/>
+      2. Markdown code fences (used by base/chat models):
+           ```bash
+           command
+           ```
+           ```python  (written to a path extracted from surrounding text)
+           content
+           ```
 
     Returns:
         (action_type, action_content) tuple.
     """
+    # --- Structured tag format ---
+
     # <bash>...</bash>
     bash_match = re.search(r"<bash>(.*?)</bash>", text, re.DOTALL)
     if bash_match:
@@ -47,14 +57,84 @@ def parse_action(text: str) -> tuple[str, str]:
     if edit_match:
         path = edit_match.group(1)
         content = edit_match.group(2)
+        # Strip markdown code fences if the model wrapped the content in ```python ... ```
+        content = re.sub(r'^\s*```[^\n]*\n', '', content)
+        content = re.sub(r'\n```\s*$', '', content)
         return ACTION_EDIT, f"{path}\n{content}"
 
-    # <done/>
-    if "<done" in text.lower():
+    # --- Markdown code fence format ---
+    # Check fences BEFORE <done/> so that code fences inside ```bash blocks
+    # (e.g. a model writing ```bash\n<done/>\n```) don't trigger early exit.
+
+    # Models often produce multi-fence responses: a python code block with the
+    # file edit followed by a bash command to test it.  We must detect file-edit
+    # fences that appear *before* the first bash fence so the edit actually
+    # reaches disk.
+
+    bash_fence = re.search(r"```(?:bash|sh)\s*\n(.*?)```", text, re.DOTALL)
+
+    if bash_fence:
+        # Check for python/code fences BEFORE the bash fence that look like
+        # file edits (substantial content + a /testbed path in preceding text).
+        pre_bash = text[: bash_fence.start()]
+        py_fences = list(re.finditer(r"```(?:python|py)?\s*\n(.*?)```", pre_bash, re.DOTALL))
+        if py_fences:
+            # Take the largest python block (most likely the complete file)
+            best = max(py_fences, key=lambda m: len(m.group(1)))
+            if len(best.group(1)) > 200:
+                # Search for a /testbed/*.py path anywhere before this block
+                all_paths = list(re.finditer(
+                    r"`?(/testbed/[^\s`\"']+\.(?:py|js|ts|rb|java|go|rs|c|cpp|h|txt|cfg|yml|yaml|toml|json|xml|html|css|sh))`?",
+                    text[: best.start()],
+                ))
+                if all_paths:
+                    path = all_paths[-1].group(1)
+                    content = best.group(1).strip()
+                    return ACTION_EDIT, f"{path}\n{content}"
+
+        content = bash_fence.group(1).strip()
+        # Model sometimes puts <done/> inside a bash block — treat as done signal
+        if re.match(r"<done\s*/?>$", content, re.IGNORECASE):
+            return ACTION_DONE, ""
+        return ACTION_BASH, content
+
+    # Any other fenced block — try to find a file path hint in the preceding text
+    # e.g. "edit astropy/foo.py:" or "open astropy/foo.py"
+    lang_fence_match = re.search(r"```(\w*)\s*\n(.*?)```", text, re.DOTALL)
+    if lang_fence_match:
+        lang = lang_fence_match.group(1).lower()
+        content = lang_fence_match.group(2).strip()
+        # Look for a file path mentioned before the fence
+        path_hint = re.search(
+            r"(?:edit|open|write|create|modify|update|patch|file|implement|fix|correct)[^\n]*?`?([^\s`\"']+\.py)`?",
+            text[: lang_fence_match.start()],
+            re.IGNORECASE,
+        )
+        # Fallback: any /testbed path in the preceding text
+        if not path_hint:
+            all_paths = list(re.finditer(
+                r"`?(/testbed/[^\s`\"']+\.py)`?",
+                text[: lang_fence_match.start()],
+            ))
+            if all_paths:
+                path_hint = all_paths[-1]
+        if path_hint:
+            return ACTION_EDIT, f"{path_hint.group(1)}\n{content}"
+        # Python code blocks should be run with python, not bash
+        if lang in ("python", "py") or (
+            not lang and any(content.startswith(kw) for kw in ("import ", "from ", "def ", "class "))
+        ):
+            import shlex
+            return ACTION_BASH, f"python3 -c {shlex.quote(content)}"
+        # No path found — run as bash (e.g., a shell snippet without explicit lang tag)
+        return ACTION_BASH, content
+
+    # <done/> — checked last so code fences take priority
+    if re.search(r"<done\s*/?>", text, re.IGNORECASE):
         return ACTION_DONE, ""
 
-    # Fall back: treat entire output as bash
-    return ACTION_BASH, text.strip()
+    # Fall back: text with no code blocks and no done signal
+    return ACTION_DONE, ""
 
 
 def format_observation(result: SandboxResult, max_chars: int = 4096) -> str:
@@ -73,15 +153,47 @@ def format_observation(result: SandboxResult, max_chars: int = 4096) -> str:
     return output
 
 
-SYSTEM_PROMPT = """You are a software engineer fixing a bug in a repository. You have access to a Docker container with the repository checked out.
+SYSTEM_PROMPT = """You are an autonomous software engineer. A repository is checked out at /testbed. Your job is to fix the bug described below.
 
-Available actions:
-- <bash>command</bash> : Run a shell command
-- <edit path="filepath">new file content</edit> : Write/overwrite a file
-- <done/> : Signal that you've completed the fix
+You have three actions — use exactly one per response, then wait for the result:
 
-After each action, you'll see the output. Use it to debug and iterate.
-Fix the issue described below, then run the tests to verify your fix works."""
+  <bash>shell command here</bash>
+  <edit path="/testbed/path/to/file.py">complete new file content</edit>
+  <done/>
+
+─── WORKFLOW ───────────────────────────────────────────────────────────────────
+
+Phase 1 – EXPLORE (read-only, do not edit yet)
+  • Find the relevant source file:
+      <bash>grep -r "function_name" /testbed --include="*.py" -l</bash>
+  • Read it in full:
+      <bash>cat /testbed/module/file.py</bash>
+  • Reproduce the failure to confirm you understand it:
+      <bash>cd /testbed && python -c "..."</bash>
+
+Phase 2 – IMPLEMENT
+  • After reading the full file, write the complete corrected version:
+      <edit path="/testbed/module/file.py">
+      [COMPLETE file content — every line, no omissions, no placeholders]
+      </edit>
+  • The <edit> content is written verbatim to disk. Do NOT wrap it in ```python blocks.
+
+Phase 3 – VERIFY
+  • Run only the tests relevant to this fix (not the entire suite):
+      <bash>cd /testbed && python -m pytest tests/test_file.py::TestClass::test_name -x -q 2>&1 | tail -20</bash>
+  • If tests fail, read the error, edit the file again, re-run.
+
+Phase 4 – DONE
+  • Once the relevant tests pass, signal completion:
+      <done/>
+  • <done/> is a standalone tag — never put it inside a ```bash block.
+
+─── RULES ──────────────────────────────────────────────────────────────────────
+  • Always use real /testbed paths — never /path/to/... placeholders.
+  • Read the full file before overwriting it — partial edits corrupt the file.
+  • One action per response; wait for the observation before acting again.
+  • Pipe long outputs through tail: <bash>cmd 2>&1 | tail -30</bash>
+────────────────────────────────────────────────────────────────────────────────"""
 
 
 class MultiTurnExecutor:
@@ -243,13 +355,7 @@ class MultiTurnExecutor:
         """
         # Build initial prompt
         initial_prompt = f"{SYSTEM_PROMPT}\n\n## Issue\n{task.problem_statement}"
-        if tokenizer and hasattr(tokenizer, "apply_chat_template"):
-            messages = [{"role": "user", "content": initial_prompt}]
-            conversation = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-        else:
-            conversation = initial_prompt
+        messages = [{"role": "user", "content": initial_prompt}]
 
         import ray
 
@@ -259,6 +365,13 @@ class MultiTurnExecutor:
         prompt_ids_tensor = None
 
         for turn in range(max_turns):
+            if tokenizer and hasattr(tokenizer, "apply_chat_template"):
+                conversation = tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+            else:
+                conversation = "\n".join(m["content"] for m in messages)
+
             # Generate one turn
             generation_results = ray.get(
                 self.rollout_engine.generate.remote(
@@ -284,7 +397,14 @@ class MultiTurnExecutor:
             # Parse action and execute
             action_type, action_content = parse_action(result.response_text)
 
+            # Add model response to message history
+            messages.append({"role": "assistant", "content": result.response_text})
+
             if action_type == ACTION_DONE:
+                break
+
+            if not action_content.strip():
+                # Model emitted no executable content; stop the trajectory.
                 break
 
             if action_type == ACTION_BASH:
@@ -292,29 +412,32 @@ class MultiTurnExecutor:
             elif action_type == ACTION_EDIT:
                 lines = action_content.split("\n", 1)
                 if len(lines) == 2:
-                    sandbox_result = sandbox.write_file(lines[0], lines[1])
+                    file_path = lines[0]
+                    sandbox_result = sandbox.write_file(file_path, lines[1])
                 else:
+                    file_path = ""
                     sandbox_result = SandboxResult("", "Invalid edit format", 1)
             else:
-                sandbox_result = sandbox.execute(action_content)
+                # Unknown action type — stop rather than running raw text as bash
+                break
 
             observation = format_observation(sandbox_result)
+            # Provide explicit feedback for edits so the model knows it worked
+            if action_type == ACTION_EDIT and sandbox_result.exit_code == 0:
+                observation = f"File {file_path} written successfully."
+            obs_content = f"[Observation]\n{observation}\n\nContinue fixing the issue."
 
-            # Append observation to conversation for next turn
-            if tokenizer and hasattr(tokenizer, "apply_chat_template"):
-                conversation = result.prompt_text + result.response_text
-                obs_turn = f"\n\n[Observation]\n{observation}\n\nContinue fixing the issue."
-                conversation += obs_turn
-            else:
-                conversation = result.prompt_text + result.response_text
-                conversation += f"\n\n[Observation]\n{observation}\n\n"
+            # Add observation as a new user turn to maintain proper chat format
+            messages.append({"role": "user", "content": obs_content})
 
             # Tokenize observation tokens (these are NOT model-generated)
             if tokenizer:
-                obs_tokens = tokenizer.encode(
-                    f"\n\n[Observation]\n{observation}\n\n",
-                    add_special_tokens=False,
-                )
+                obs_text = obs_content
+                if tokenizer and hasattr(tokenizer, "apply_chat_template"):
+                    # Encode just the observation turn as it will appear in the next prompt
+                    obs_tokens = tokenizer.encode(obs_text, add_special_tokens=False)
+                else:
+                    obs_tokens = tokenizer.encode(obs_text, add_special_tokens=False)
                 # Pad log_probs with zeros for observation tokens (masked out during training)
                 all_response_ids.extend(obs_tokens)
                 all_log_probs.extend([0.0] * len(obs_tokens))

@@ -24,8 +24,7 @@ training:
   train_batch_size: 4
   micro_batch_size: 1
   num_epochs: 1
-  max_steps: 200
-  save_steps: 10
+  save_steps: 50
   logging_steps: 1
   gradient_checkpointing: true
   num_ppo_epochs: 1
@@ -44,7 +43,6 @@ data:
   prompt_dataset_split: test
   input_key: problem_statement
   label_key: instance_id
-  max_samples: 50
 
 infra:
   vllm_num_engines: 1

@@ -6,6 +6,8 @@ for running code edits and test suites against SWE-bench task instances.
 
 from __future__ import annotations
 
+import re
+import shlex
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -98,35 +100,37 @@ class DockerSandbox:
         if self._container is None:
             raise RuntimeError("Sandbox not started")
 
+        # docker-py's exec_run has no timeout parameter; enforce via shell timeout(1).
+        # Exit code 124 means the timeout was reached.
+        # Prepend the SWE-bench conda env so 'python', 'pytest', etc. resolve correctly.
+        env_prefix = "export PATH=/opt/miniconda3/envs/testbed/bin:$PATH && "
+        wrapped = f"timeout {self.timeout} bash -c {shlex.quote(env_prefix + command)}"
+
         try:
             exit_code, output = self._container.exec_run(
-                ["bash", "-c", command],
+                ["bash", "-c", wrapped],
                 demux=True,
-                timeout=self.timeout,
             )
             stdout = (output[0] or b"").decode("utf-8", errors="replace")
             stderr = (output[1] or b"").decode("utf-8", errors="replace")
+            timed_out = exit_code == 124
             return SandboxResult(
                 stdout=stdout,
                 stderr=stderr,
                 exit_code=exit_code,
-                timed_out=False,
+                timed_out=timed_out,
             )
         except Exception as e:
-            error_msg = str(e)
-            timed_out = "timeout" in error_msg.lower() or "timed out" in error_msg.lower()
             return SandboxResult(
                 stdout="",
-                stderr=f"Execution error: {error_msg}",
+                stderr=f"Execution error: {e}",
                 exit_code=-1,
-                timed_out=timed_out,
+                timed_out=False,
             )
 
     def write_file(self, path: str, content: str) -> SandboxResult:
         """Write content to a file inside the container."""
         import base64
-
-        import shlex
         encoded = base64.b64encode(content.encode()).decode()
         cmd = f"echo '{encoded}' | base64 -d > {shlex.quote(path)}"
         return self.execute(cmd)
@@ -141,13 +145,126 @@ class DockerSandbox:
         return self.execute("cd /testbed && git apply /tmp/patch.diff")
 
     def run_tests(self, test_names: Optional[list[str]] = None) -> SandboxResult:
-        """Run the test suite (or specific tests) inside the container."""
+        """Run the test suite (or specific tests) inside the container.
+
+        Detects unittest-style names (``test_foo (module.Class)``) and routes
+        them through Django's ``tests/runtests.py``; all other names go to pytest.
+        """
+        if test_names and any("(" in t for t in test_names):
+            return self._run_django_tests(test_names)
+
+        # Bare names with spaces = Django docstring tests with no module context
+        if test_names and all("::" not in t for t in test_names) and any(" " in t for t in test_names):
+            return self._run_django_bare_tests(test_names)
+
+        # Bare Python identifiers (no spaces, no ::) → sympy-style runner
+        if test_names and all("::" not in t for t in test_names):
+            return self._run_sympy_tests(test_names)
+
         if test_names:
+            # Do NOT individually shlex.quote here — execute() wraps the entire
+            # command in a single-quoted bash -c string, so [param] brackets are
+            # already safe.  Extra quoting would produce nested quotes that break
+            # pytest argument parsing.
             test_args = " ".join(test_names)
-            cmd = f"cd /testbed && python -m pytest {test_args} -x --tb=short 2>&1"
+            cmd = f"cd /testbed && python -m pytest {test_args} --tb=short -v 2>&1"
         else:
-            cmd = "cd /testbed && python -m pytest --tb=short 2>&1"
+            cmd = "cd /testbed && python -m pytest --tb=short -v 2>&1"
+        result = self.execute(cmd)
+
+        # Exit code 4: pytest collected 0 items because some node IDs don't exist.
+        # Extract the not-found IDs, drop them, and retry with the remaining tests.
+        if result.exit_code == 4 and test_names:
+            not_found = set(re.findall(r"ERROR: not found: \S+::(\S+)", result.stdout))
+            surviving = [t for t in test_names if not any(nf in t for nf in not_found)]
+            if surviving and len(surviving) < len(test_names):
+                test_args2 = " ".join(surviving)
+                cmd2 = f"cd /testbed && python -m pytest {test_args2} --tb=short -v 2>&1"
+                return self.execute(cmd2)
+
+        return result
+
+    def _run_django_tests(self, test_names: list[str]) -> SandboxResult:
+        """Run Django-style unittest tests via tests/runtests.py.
+
+        Runs the top-level module(s) inferred from parseable test names rather
+        than individual dotted paths.  This ensures bare-docstring test names
+        (which have no ``(module.Class)`` suffix) also appear in the output.
+        """
+        _pat = re.compile(r"^.+?\s+\(([a-zA-Z0-9_.]+)\)$")
+        modules: set[str] = set()
+        for name in test_names:
+            m = _pat.match(name.strip())
+            if m:
+                # Use top-level module component (e.g. "test_utils" from "test_utils.tests.Cls")
+                modules.add(m.group(1).split(".")[0])
+
+        if modules:
+            args = " ".join(shlex.quote(mod) for mod in sorted(modules))
+        else:
+            # Fallback: pass names directly (will likely error, but best-effort)
+            args = " ".join(shlex.quote(t) for t in test_names)
+
+        cmd = f"cd /testbed && PYTHONIOENCODING=utf-8 python tests/runtests.py --verbosity=2 {args} 2>&1"
         return self.execute(cmd)
+
+    def _run_django_bare_tests(self, test_names: list[str]) -> SandboxResult:
+        """Run Django bare-docstring tests (no module.Class context) via runtests.py.
+
+        Finds which Django test module contains each docstring by grepping the
+        tests/ directory, then runs those modules so the bare-docstring output
+        lines are captured and can be parsed.
+        """
+        modules: set[str] = set()
+        for test_name in test_names:
+            # Search for the docstring text in Django test files
+            safe = test_name.replace("'", r"'\''")  # escape for shell single-quote
+            r = self.execute(
+                f"grep -rl '{safe}' /testbed/tests --include='*.py' 2>/dev/null | head -3"
+            )
+            for path in r.stdout.strip().splitlines():
+                # /testbed/tests/model_fields/tests.py → model_fields
+                rel = path.replace("/testbed/tests/", "").split("/")[0]
+                if rel.endswith(".py"):
+                    rel = rel[:-3]
+                modules.add(rel)
+
+        if not modules:
+            return SandboxResult(stdout="", stderr="no modules found", exit_code=1)
+
+        args = " ".join(shlex.quote(m) for m in sorted(modules))
+        cmd = f"cd /testbed && PYTHONIOENCODING=utf-8 python tests/runtests.py --verbosity=2 {args} 2>&1"
+        return self.execute(cmd)
+
+    def _run_sympy_tests(self, test_names: list[str]) -> SandboxResult:
+        """Run sympy bare-name tests via /testbed/bin/test with -k filtering.
+
+        Emits synthetic ``SYMPY_RESULT: <name> PASSED/FAILED`` lines so
+        ``parse_pytest_results`` can score them by test name.
+        """
+        lines: list[str] = []
+        for test_name in test_names:
+            # Find all sympy test files that define this function
+            r_find = self.execute(
+                f"grep -rl 'def {test_name}' /testbed/sympy --include='*.py' 2>/dev/null"
+            )
+            test_files = [
+                f.replace("/testbed/", "")
+                for f in r_find.stdout.strip().splitlines()
+                if f.strip()
+            ]
+            if not test_files:
+                lines.append(f"SYMPY_RESULT: {test_name} FAILED")
+                continue
+
+            files_arg = " ".join(test_files)
+            r = self.execute(
+                f"cd /testbed && bin/test {files_arg} -k {test_name} 2>&1 | tail -5"
+            )
+            status = "PASSED" if "[OK]" in r.stdout else "FAILED"
+            lines.append(f"SYMPY_RESULT: {test_name} {status}")
+
+        return SandboxResult(stdout="\n".join(lines), stderr="", exit_code=0)
 
     def stop(self):
         """Stop and remove the container."""

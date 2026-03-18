@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
@@ -64,6 +65,7 @@ def run_trajectory(
     memory_limit: str,
     cpu_limit: float,
     model_lock: threading.Lock,
+    verbose: bool = False,
 ) -> tuple[float, dict]:
     """Run a single multi-turn trajectory for one SWE-bench task.
 
@@ -71,11 +73,10 @@ def run_trajectory(
         reward: 1.0 if all tests pass, 0.0 otherwise.
         info: dict with per-task test results.
     """
-    initial_prompt = f"{SYSTEM_PROMPT}\n\n## Issue\n{task.problem_statement}"
-    messages = [{"role": "user", "content": initial_prompt}]
-    conversation = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": f"## Issue\n{task.problem_statement}"},
+    ]
 
     with DockerSandbox(
         task=task,
@@ -83,14 +84,21 @@ def run_trajectory(
         memory_limit=memory_limit,
         cpu_limit=cpu_limit,
     ) as sandbox:
+        last_action = None
+        repeat_count = 0
+
         for turn in range(max_turns):
+            conversation = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+
             # Serialize GPU inference: only one thread may call generate() at a time.
             with model_lock:
                 inputs = tokenizer(
                     conversation,
                     return_tensors="pt",
                     truncation=True,
-                    max_length=4096,
+                    max_length=16384,
                 ).to(device)
 
                 with torch.no_grad():
@@ -108,7 +116,54 @@ def run_trajectory(
 
             action_type, action_content = parse_action(response_text)
 
+            if verbose:
+                print(f"\n[{task.instance_id}] Turn {turn+1}")
+                print(f"  Response ({len(response_text)} chars): {response_text[:200]!r}")
+                print(f"  Action: {action_type}, content ({len(action_content)} chars): {action_content[:150]!r}")
+
+            # Detect repetitive loops — if the model repeats the same action
+            # 2+ times, nudge it to try something different.
+            current_action = (action_type, action_content.strip())
+            if current_action == last_action:
+                repeat_count += 1
+                if repeat_count >= 2:
+                    if verbose:
+                        print(f"  → loop detected ({repeat_count} repeats), nudging model")
+                    messages.append({"role": "assistant", "content": response_text})
+                    messages.append({"role": "user", "content":
+                        "You are repeating the same action. Try a different approach:\n"
+                        "- If you haven't edited the file yet, read it with <bash>cat path</bash> "
+                        "then write the fix with <edit path=\"/testbed/...\">complete file</edit>\n"
+                        "- If you already edited, run <done/> to finish."
+                    })
+                    last_action = None
+                    repeat_count = 0
+                    continue
+            else:
+                last_action = current_action
+                repeat_count = 0
+
+            # Add model response to message history
+            messages.append({"role": "assistant", "content": response_text})
+
             if action_type == ACTION_DONE:
+                # Genuine <done/> tag — model signalled completion
+                if re.search(r"<done\s*/?>", response_text, re.IGNORECASE):
+                    break
+                # No parseable action — prompt the model to give one
+                if verbose:
+                    print(f"  → no action found, prompting for explicit action")
+                messages.append({"role": "user", "content":
+                    "Please provide a concrete action:\n"
+                    "- Run a command: <bash>command</bash>\n"
+                    "- Edit a file: <edit path=\"filepath\">new file content</edit>\n"
+                    "- Signal done: <done/>"
+                })
+                continue
+
+            if not action_content.strip():
+                if verbose:
+                    print(f"  → empty action_content, stopping")
                 break
 
             if action_type == ACTION_BASH:
@@ -116,18 +171,27 @@ def run_trajectory(
             elif action_type == ACTION_EDIT:
                 lines = action_content.split("\n", 1)
                 if len(lines) == 2:
-                    result = sandbox.write_file(lines[0], lines[1])
+                    file_path = lines[0]
+                    result = sandbox.write_file(file_path, lines[1])
                 else:
+                    file_path = ""
                     result = SandboxResult("", "Invalid edit format", 1)
             else:
-                result = sandbox.execute(action_content)
+                # Unknown action type — skip rather than running raw text as bash
+                break
+
+            if verbose:
+                obs_preview = (result.stdout + result.stderr)[:300]
+                print(f"  Sandbox exit={result.exit_code}: {obs_preview!r}")
 
             observation = format_observation(result)
 
-            # Extend conversation with model response + observation
-            conversation += response_text
-            obs_text = f"\n\n[Observation]\n{observation}\n\nContinue fixing the issue."
-            conversation += obs_text
+            # Provide explicit feedback for edits so the model knows it worked
+            if action_type == ACTION_EDIT and result.exit_code == 0:
+                observation = f"File {file_path} written successfully."
+
+            # Add observation as a new user turn to maintain proper chat format
+            messages.append({"role": "user", "content": f"[Observation]\n{observation}\n\nContinue fixing the issue."})
 
         # Use a longer timeout for the final test scoring run.
         sandbox.timeout = test_timeout
@@ -147,6 +211,7 @@ def evaluate(
     memory_limit: str,
     cpu_limit: float,
     device: str,
+    verbose: bool = False,
 ) -> tuple[float, list[dict]]:
     print(f"\nLoading {model_path} ...")
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
@@ -172,6 +237,7 @@ def evaluate(
             max_turns, max_new_tokens, device,
             sandbox_timeout, test_timeout,
             memory_limit, cpu_limit, model_lock,
+            verbose=verbose,
         )
 
     with tqdm(total=len(tasks), desc=model_path.split("/")[-1]) as pbar:
@@ -230,10 +296,10 @@ def main() -> None:
                         help="Number of instances to evaluate (default: all)")
     parser.add_argument("--max_turns", type=int, default=5,
                         help="Max agent turns per instance (default: 5)")
-    parser.add_argument("--max_new_tokens", type=int, default=512,
-                        help="Max tokens to generate per turn (default: 512)")
-    parser.add_argument("--max_workers", type=int, default=4,
-                        help="Parallel sandbox workers (default: 4)")
+    parser.add_argument("--max_new_tokens", type=int, default=2048,
+                        help="Max tokens to generate per turn (default: 2048)")
+    parser.add_argument("--max_workers", type=int, default=2,
+                        help="Parallel sandbox workers (default: 2)")
     parser.add_argument("--sandbox_timeout", type=int, default=120,
                         help="Per-command sandbox timeout during trajectory in seconds (default: 120)")
     parser.add_argument("--test_timeout", type=int, default=300,
@@ -243,8 +309,10 @@ def main() -> None:
     parser.add_argument("--cpu_limit", type=float, default=2.0,
                         help="Docker CPU limit per sandbox (default: 2.0)")
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--output_json", type=str, default=None,
+    parser.add_argument("--output_json", type=str, default="eval_results.json",
                         help="Optional path to write per-instance results as JSON")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Print each turn's model output and action for debugging")
     args = parser.parse_args()
 
     print(f"Loading {args.dataset} ({args.split}) ...")
@@ -266,6 +334,7 @@ def main() -> None:
         memory_limit=args.memory_limit,
         cpu_limit=args.cpu_limit,
         device=args.device,
+        verbose=args.verbose,
     )
 
     resolved = sum(1 for r in results if r.get("resolved"))

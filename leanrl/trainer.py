@@ -205,7 +205,7 @@ class GRPOTrainer:
                     self.metrics.log(step_metrics, step=self.global_step)
 
                 # --- Checkpointing ---
-                if cfg.training.save_steps > 0 and (self.global_step + 1) % cfg.training.save_steps == 0:
+                if cfg.training.save_steps > 0 and self.global_step > 0 and self.global_step % cfg.training.save_steps == 0:
                     self._save_checkpoint()
 
                 self.global_step += 1
