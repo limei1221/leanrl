@@ -34,7 +34,7 @@ swe:
   max_turns: 5
   docker_image_prefix: swebench
   sandbox_timeout: 120
-  max_concurrent_sandboxes: 16
+  max_concurrent_sandboxes: 8
   sandbox_memory_limit: 4g
   sandbox_cpu_limit: 2.0
 

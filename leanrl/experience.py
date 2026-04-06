@@ -147,13 +147,12 @@ class ExperienceBuffer:
     """Simple buffer that accumulates experiences across rollout rounds."""
 
     def __init__(self, max_size: int = 0):
-        self._buffer: list[Experience] = []
-        self._max_size = max_size
+        from collections import deque
+
+        self._buffer: deque[Experience] = deque(maxlen=max_size if max_size > 0 else None)
 
     def add(self, exp: Experience):
         self._buffer.append(exp)
-        if self._max_size > 0 and len(self._buffer) > self._max_size:
-            self._buffer.pop(0)
 
     def clear(self):
         self._buffer.clear()

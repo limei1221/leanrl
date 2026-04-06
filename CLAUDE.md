@@ -19,21 +19,29 @@ pip install -e ".[dev]"
 apt-get install -y libopenmpi-dev openmpi-bin
 ```
 
-### Lint
+### Lint & Format
 ```bash
 ruff check leanrl/
+ruff check --fix leanrl/  # auto-fix
+ruff format leanrl/       # auto-format
 ```
+
+Style: line-length 100, target Python 3.10 (configured in pyproject.toml).
 
 ### Test
 ```bash
 pytest tests/
-pytest tests/test_grpo.py  # single test file
+pytest tests/test_grpo.py          # single file
+pytest tests/test_grpo.py::test_fn # single test
 ```
 
-### Train
+All tests are mock-based and run without a GPU.
+
+### Train (also available as `leanrl-train` CLI)
 ```bash
 # Math (GSM8K) — requires Ray on GPU 1, training on GPU 0
 CUDA_VISIBLE_DEVICES=1 ray start --head --num-gpus=1
+# Ensure config has infra.ray_address: "auto" so trainer connects to external Ray cluster
 CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   python -m leanrl.trainer --config configs/math_grpo_1.5b.yaml
 # Or via script:
@@ -97,10 +105,12 @@ Non-model tokens (observations/system messages) are masked out during training s
 ### Configuration
 
 All training hyperparameters are in YAML configs under `configs/`. Key sections:
+- `task`: `"math"` or `"swe"` — selects reward function and agent type
+- `model`: `model_name_or_path`, optional `ref_model_name_or_path` (defaults to same model)
 - `grpo`: `n_samples_per_prompt` (G), `kl_coef`, `clip_range`, `entropy_coef`
-- `rollout`: `batch_size`, `max_new_tokens`, `temperature`
-- `training`: `lr`, `micro_batch_size`, `train_batch_size`, `num_ppo_epochs`
+- `rollout`: `rollout_batch_size`, `max_new_tokens`, `temperature`
+- `training`: `lr`, `micro_batch_size`, `train_batch_size`, `num_ppo_epochs`, `max_steps` (-1 = full dataset)
 - `infra`: `deepspeed_stage` (2 or 3), `offload_optimizer`, `vllm_enable_sleep`
-- `swe` (SWE-bench only): `max_turns`, `timeout`, `max_concurrent` sandboxes
+- `swe` (SWE-bench only): `max_turns`, `sandbox_timeout`, `max_concurrent_sandboxes`
 
 Baseline GSM8K accuracy for Qwen2.5-1.5B-Instruct after training: ~69.8%.

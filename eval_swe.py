@@ -131,10 +131,7 @@ def run_trajectory(
                         print(f"  → loop detected ({repeat_count} repeats), nudging model")
                     messages.append({"role": "assistant", "content": response_text})
                     messages.append({"role": "user", "content":
-                        "You are repeating the same action. Try a different approach:\n"
-                        "- If you haven't edited the file yet, read it with <bash>cat path</bash> "
-                        "then write the fix with <edit path=\"/testbed/...\">complete file</edit>\n"
-                        "- If you already edited, run <done/> to finish."
+                        "You are repeating the same action. Try a different approach."
                     })
                     last_action = None
                     repeat_count = 0
@@ -154,10 +151,8 @@ def run_trajectory(
                 if verbose:
                     print(f"  → no action found, prompting for explicit action")
                 messages.append({"role": "user", "content":
-                    "Please provide a concrete action:\n"
-                    "- Run a command: <bash>command</bash>\n"
-                    "- Edit a file: <edit path=\"filepath\">new file content</edit>\n"
-                    "- Signal done: <done/>"
+                    "Please provide a bash command wrapped in <bash>...</bash> tags, "
+                    "or <done/> if you are finished."
                 })
                 continue
 
@@ -296,10 +291,10 @@ def main() -> None:
                         help="Number of instances to evaluate (default: all)")
     parser.add_argument("--max_turns", type=int, default=5,
                         help="Max agent turns per instance (default: 5)")
-    parser.add_argument("--max_new_tokens", type=int, default=512,
-                        help="Max tokens to generate per turn (default: 512)")
-    parser.add_argument("--max_workers", type=int, default=4,
-                        help="Parallel sandbox workers (default: 4)")
+    parser.add_argument("--max_new_tokens", type=int, default=2048,
+                        help="Max tokens to generate per turn (default: 2048)")
+    parser.add_argument("--max_workers", type=int, default=8,
+                        help="Parallel sandbox workers (default: 8)")
     parser.add_argument("--sandbox_timeout", type=int, default=120,
                         help="Per-command sandbox timeout during trajectory in seconds (default: 120)")
     parser.add_argument("--test_timeout", type=int, default=300,

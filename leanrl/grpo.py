@@ -76,7 +76,7 @@ def grpo_policy_loss(
     advantages: Tensor,
     mask: Tensor,
     clip_range: float = 0.2,
-) -> Tensor:
+) -> tuple[Tensor, Tensor]:
     """Clipped surrogate policy loss for GRPO.
 
     Same as PPO's clipped objective but uses group-normalized advantages
@@ -91,6 +91,7 @@ def grpo_policy_loss(
 
     Returns:
         loss: scalar policy loss (to be minimized).
+        ratio: (B, T) importance sampling ratio (reused for clip-fraction monitoring).
     """
     # Per-token importance ratio
     ratio = (log_probs - old_log_probs).exp()
@@ -106,7 +107,7 @@ def grpo_policy_loss(
 
     # Masked mean over response tokens
     loss = (per_token_loss * mask).sum() / mask.sum().clamp(min=1)
-    return loss
+    return loss, ratio
 
 
 def grpo_loss(
@@ -128,7 +129,7 @@ def grpo_loss(
 
     Returns both the scalar loss and a dict of metrics for logging.
     """
-    policy_loss = grpo_policy_loss(log_probs, old_log_probs, advantages, mask, clip_range)
+    policy_loss, ratio = grpo_policy_loss(log_probs, old_log_probs, advantages, mask, clip_range)
     kl = compute_kl_penalty(log_probs, ref_log_probs, mask)
 
     loss = policy_loss + kl_coef * kl
@@ -140,9 +141,8 @@ def grpo_loss(
     else:
         mean_entropy = torch.tensor(0.0, device=loss.device)
 
-    # Approximate clip fraction for monitoring
+    # Approximate clip fraction for monitoring (reuse ratio from policy loss)
     with torch.no_grad():
-        ratio = (log_probs - old_log_probs).exp()
         clip_frac = ((ratio - 1.0).abs() > clip_range).float()
         clip_frac = (clip_frac * mask).sum() / mask.sum().clamp(min=1)
 

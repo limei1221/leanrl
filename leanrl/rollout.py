@@ -133,9 +133,9 @@ class RolloutEngine:
         cfg = self._rollout_cfg
         sampling_params = SamplingParams(
             n=n_samples,
-            max_tokens=max_new_tokens or cfg.max_new_tokens,
-            temperature=temperature or cfg.temperature,
-            top_p=top_p or cfg.top_p,
+            max_tokens=max_new_tokens if max_new_tokens is not None else cfg.max_new_tokens,
+            temperature=temperature if temperature is not None else cfg.temperature,
+            top_p=top_p if top_p is not None else cfg.top_p,
             top_k=cfg.top_k if cfg.top_k > 0 else -1,
             logprobs=1,
         )

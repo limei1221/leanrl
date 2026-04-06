@@ -95,8 +95,19 @@ class GRPOTrainer:
             n_samples = 10000
 
         batch_size = cfg.rollout.rollout_batch_size
-        steps_per_epoch = max(1, n_samples // batch_size)
-        return steps_per_epoch * cfg.training.num_epochs
+        rollout_steps_per_epoch = max(1, n_samples // batch_size)
+        total_rollout_steps = rollout_steps_per_epoch * cfg.training.num_epochs
+
+        # Each rollout step runs num_ppo_epochs over the experience batch.
+        # DeepSpeed counts an optimizer step every gradient_accumulation_steps
+        # micro-batches, so we need to convert rollout steps to optimizer steps.
+        samples_per_rollout = batch_size * cfg.grpo.n_samples_per_prompt
+        microbatches_per_epoch = max(1, samples_per_rollout // cfg.training.micro_batch_size)
+        grad_accum = max(1, cfg.training.train_batch_size // cfg.training.micro_batch_size)
+        optimizer_steps_per_rollout = (
+            cfg.training.num_ppo_epochs * microbatches_per_epoch // grad_accum
+        )
+        return total_rollout_steps * max(1, optimizer_steps_per_rollout)
 
     def _setup_data(self):
         """Build prompt dataloader."""

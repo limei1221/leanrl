@@ -1,92 +1,47 @@
 #!/bin/bash
 # Build SWE-bench instance Docker images locally for LeanRL training.
 #
-# Builds sweb.eval.x86_64.{instance_id}:latest images used by the sandbox.
-# Each instance image has the repo checked out at base_commit with test patch applied.
+# Patches known swebench build failures (pylint, scikit-learn, stale branches),
+# then builds sweb.eval.x86_64.{instance_id}:latest images used by the sandbox.
 #
 # Usage:
 #   bash scripts/setup_swe_docker.sh                    # all 300 Lite instances
 #   MAX_SAMPLES=50 bash scripts/setup_swe_docker.sh     # first 50 instances only
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 echo "=== SWE-bench Docker Image Setup ==="
 
-# Verify Docker
 if ! docker info &>/dev/null; then
     echo "ERROR: Docker is not running."
     exit 1
 fi
 
-# Install swebench Python package for harness
-pip install swebench 2>/dev/null || echo "swebench package already installed or pip failed"
+pip install -q swebench 2>/dev/null || true
 
-MAX_WORKERS="${SWE_MAX_WORKERS:-16}"
-MAX_SAMPLES="${MAX_SAMPLES:-0}"   # 0 = all instances
+MAX_WORKERS="${SWE_MAX_WORKERS:-4}"
+MAX_SAMPLES="${MAX_SAMPLES:-0}"
+RETRY_COUNT="${RETRY_COUNT:-2}"
 
 echo "Max workers:  $MAX_WORKERS"
-echo "Max samples:  ${MAX_SAMPLES:-all}"
+echo "Max samples:  $MAX_SAMPLES (0=all)"
+echo "Retry count:  $RETRY_COUNT"
 echo ""
 
-python - <<EOF
-import sys
-import docker
-from datasets import load_dataset
-from swebench.harness.docker_build import build_env_images, build_instance_images
+# Step 1: Patch swebench source files (separate process so the build
+# step imports the already-patched modules).
+echo "Patching swebench for known build failures..."
+python3 "$SCRIPT_DIR/setup_swe_docker.py" --patch-only
 
-print("Loading SWE-bench Lite dataset (princeton-nlp/SWE-bench_Lite)...")
-dataset = list(load_dataset("princeton-nlp/SWE-bench_Lite", split="test"))
-
-max_samples = int("${MAX_SAMPLES}")
-if max_samples > 0:
-    dataset = dataset[:max_samples]
-
-print(f"Building instance images for {len(dataset)} instances...")
-print("Step 1/2: env images (environment + dependencies)...\n")
-
-from swebench.harness.docker_build import BuildImageError
-
-client = docker.from_env()
-try:
-    successful, failed = build_env_images(
-        client=client,
-        dataset=dataset,
-        force_rebuild=False,
-        max_workers=int("${MAX_WORKERS}"),
-        instance_image_tag="latest",
-        env_image_tag="latest",
-    )
-except BuildImageError as e:
-    print(f"WARNING: env image build error (continuing): {e}")
-    failed = []
-if failed:
-    print(f"WARNING: {len(failed)} env image(s) failed to build:")
-    for img in failed:
-        print(f"  {img}")
-
-print(f"\nStep 2/2: instance images (repo at base_commit + test patch)...\n")
-try:
-    successful, failed = build_instance_images(
-        client=client,
-        dataset=dataset,
-        force_rebuild=False,
-        max_workers=int("${MAX_WORKERS}"),
-        env_image_tag="latest",
-        tag="latest",
-    )
-except BuildImageError as e:
-    print(f"WARNING: instance image build error (continuing): {e}")
-    successful, failed = [], []
-
-print(f"\nSuccessful: {len(successful)}")
-print(f"Failed:     {len(failed)}")
-if failed:
-    print("Failed images:")
-    for img in failed:
-        print(f"  {img}")
-    print("WARNING: some images failed — continuing anyway")
-EOF
+# Step 2: Build images (fresh import picks up patched files).
+echo ""
+python3 "$SCRIPT_DIR/setup_swe_docker.py" \
+    --max-workers "$MAX_WORKERS" \
+    --max-samples "$MAX_SAMPLES" \
+    --retries "$RETRY_COUNT"
 
 echo ""
 echo "=== Setup complete ==="
-echo "Built instance images:"
-docker images --filter "reference=sweb.eval.x86_64.*" --format "  {{.Repository}}:{{.Tag}} ({{.Size}})" | head -20
+total=$(docker images --filter "reference=sweb.eval.x86_64.*" --format "{{.Repository}}" | wc -l)
+echo "Instance images built: $total"

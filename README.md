@@ -18,32 +18,21 @@ LeanRL implements **GRPO (Group Relative Policy Optimization)** for both math ve
 # Install (editable + dev deps)
 # On a fresh GPU machine, system MPI libraries are required by DeepSpeed at runtime:
 #   apt-get update && apt-get install -y libopenmpi-dev openmpi-bin
+# If CUDA tooling is missing, install it:
+#   apt-get install -y nvidia-cuda-toolkit
 pip install -e ".[dev]"
 
 # 2-GPU setup (recommended)
 #
 # GPU 0: Policy + Reference model (DeepSpeed)
 # GPU 1: vLLM rollout engine (via Ray)
-#
-CUDA_VISIBLE_DEVICES=1 ray start --head --num-gpus=1
-# Make sure your config has (either in YAML or via TrainConfig):
-# infra:
-#   ray_address: "auto"
-#
-# so that the trainer connects to the external Ray cluster instead of
-# creating a local one.
-
 
 # Train on GSM8K (math)
-CUDA_VISIBLE_DEVICES=0 \
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-python -m leanrl.trainer --config configs/math_grpo_1.5b.yaml
+bash scripts/train_math.sh
 
 # Train on SWE-bench
-CUDA_VISIBLE_DEVICES=0 \
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-bash scripts/setup_swe_docker.sh  # pull Docker images first
-python -m leanrl.trainer --config configs/swe_grpo_1.5b.yaml
+bash scripts/setup_swe_docker.sh
+bash scripts/train_swe.sh
 ```
 
 ## Architecture
@@ -74,32 +63,8 @@ All settings live in YAML config files under `configs/`. See `leanrl/utils/confi
 | GPU | During Rollout | During Training |
 |-----|---------------|-----------------|
 | 0 | idle | Policy + Reference (DeepSpeed ZeRO-2) |
-| 1 | vLLM serving | vLLM sleeping, memory released |
-
-## Troubleshooting
-
-### SWE-bench Docker image build failures
-
-If `bash scripts/setup_swe_docker.sh` fails with errors like:
-
-```
-ERROR: Project file:///testbed uses a build backend that is missing the 'build_editable' hook
-```
-or
-```
-no such option: --no-use-pep517
-```
-
-these are caused by incompatibilities between the swebench package's hardcoded pip install commands and newer versions of pip. Fix by patching the installed swebench constants file:
-
-**File:** `$(python -c "import swebench; import os; print(os.path.dirname(swebench.__file__))")/harness/constants/python.py`
-
-1. **pylint `build_editable` error** — change the default pylint install command from `python -m pip install -e .` to `python -m pip install --no-build-isolation -e .` for all versions in `SPECS_PYLINT`, and add `setuptools>=64` to pip_packages for pylint 3.0–4.0.
-
-2. **scikit-learn `--no-use-pep517` error** — remove `--no-use-pep517` from the scikit-learn install commands in `SPECS_SKLEARN` (the flag was removed in pip 23+). Keep `--no-build-isolation`.
-
-After patching, re-run `bash scripts/setup_swe_docker.sh`.
+| 1 | vLLM serving | vLLM sleeping, memory released | 
 
 ## License
 
-Apache-2.0
+MIT

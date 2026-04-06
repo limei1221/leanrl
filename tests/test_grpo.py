@@ -57,7 +57,7 @@ class TestGRPOPolicyLoss:
         old_log_probs = log_probs.clone()
         advantages = torch.zeros(B)
         mask = torch.ones(B, T)
-        loss = grpo_policy_loss(log_probs, old_log_probs, advantages, mask)
+        loss, _ = grpo_policy_loss(log_probs, old_log_probs, advantages, mask)
         assert abs(loss.item()) < 1e-6
 
     def test_positive_advantage_encourages(self):
@@ -68,9 +68,9 @@ class TestGRPOPolicyLoss:
 
         # Positive advantage should yield negative loss (reward signal)
         adv = torch.tensor([1.0, 1.0])
-        loss_pos = grpo_policy_loss(cur_lp, old_lp, adv, mask)
+        loss_pos, _ = grpo_policy_loss(cur_lp, old_lp, adv, mask)
         adv_neg = torch.tensor([-1.0, -1.0])
-        loss_neg = grpo_policy_loss(cur_lp, old_lp, adv_neg, mask)
+        loss_neg, _ = grpo_policy_loss(cur_lp, old_lp, adv_neg, mask)
         # With ratio=1, loss = -advantage, so positive adv -> more negative loss
         assert loss_pos < loss_neg
 
@@ -82,7 +82,7 @@ class TestGRPOPolicyLoss:
         mask = torch.zeros(B, T)
         mask[:, :5] = 1.0  # only first 5 tokens count
 
-        loss = grpo_policy_loss(log_probs, old_log_probs, advantages, mask)
+        loss, _ = grpo_policy_loss(log_probs, old_log_probs, advantages, mask)
         assert loss.isfinite()
 
     def test_clipping_limits_ratio(self):
@@ -93,8 +93,8 @@ class TestGRPOPolicyLoss:
         mask = torch.ones(B, T)
         advantages = torch.ones(B)
 
-        loss_clipped = grpo_policy_loss(cur_lp, old_lp, advantages, mask, clip_range=0.2)
-        loss_unclipped = grpo_policy_loss(cur_lp, old_lp, advantages, mask, clip_range=100.0)
+        loss_clipped, _ = grpo_policy_loss(cur_lp, old_lp, advantages, mask, clip_range=0.2)
+        loss_unclipped, _ = grpo_policy_loss(cur_lp, old_lp, advantages, mask, clip_range=100.0)
         # Clipping should reduce the magnitude of the loss
         assert abs(loss_clipped.item()) <= abs(loss_unclipped.item()) + 1e-6
 

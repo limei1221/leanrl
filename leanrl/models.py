@@ -185,7 +185,9 @@ class PolicyModel:
         if compute_entropy:
             # Per-token entropy: H = -sum_v p(v) * log p(v)
             per_token_entropy = -(log_probs_full.exp() * log_probs_full).sum(dim=-1)
+            del log_probs_full
         else:
+            del log_probs_full
             per_token_entropy = per_token_lp.new_zeros(per_token_lp.shape)
 
         resp_lp = _extract_response_logprobs(

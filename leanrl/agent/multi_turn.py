@@ -153,47 +153,17 @@ def format_observation(result: SandboxResult, max_chars: int = 4096) -> str:
     return output
 
 
-SYSTEM_PROMPT = """You are an autonomous software engineer. A repository is checked out at /testbed. Your job is to fix the bug described below.
+SYSTEM_PROMPT = """You are a helpful assistant that can interact with a computer shell to solve programming tasks.
+You will be given a bug report for a repository checked out at /testbed. Fix the bug by modifying the source code.
 
-You have three actions — use exactly one per response, then wait for the result:
+For each response, include your reasoning, then one or more bash commands wrapped in <bash>...</bash> tags.
+When you are done, write <done/>.
 
-  <bash>shell command here</bash>
-  <edit path="/testbed/path/to/file.py">complete new file content</edit>
-  <done/>
-
-─── WORKFLOW ───────────────────────────────────────────────────────────────────
-
-Phase 1 – EXPLORE (read-only, do not edit yet)
-  • Find the relevant source file:
-      <bash>grep -r "function_name" /testbed --include="*.py" -l</bash>
-  • Read it in full:
-      <bash>cat /testbed/module/file.py</bash>
-  • Reproduce the failure to confirm you understand it:
-      <bash>cd /testbed && python -c "..."</bash>
-
-Phase 2 – IMPLEMENT
-  • After reading the full file, write the complete corrected version:
-      <edit path="/testbed/module/file.py">
-      [COMPLETE file content — every line, no omissions, no placeholders]
-      </edit>
-  • The <edit> content is written verbatim to disk. Do NOT wrap it in ```python blocks.
-
-Phase 3 – VERIFY
-  • Run only the tests relevant to this fix (not the entire suite):
-      <bash>cd /testbed && python -m pytest tests/test_file.py::TestClass::test_name -x -q 2>&1 | tail -20</bash>
-  • If tests fail, read the error, edit the file again, re-run.
-
-Phase 4 – DONE
-  • Once the relevant tests pass, signal completion:
-      <done/>
-  • <done/> is a standalone tag — never put it inside a ```bash block.
-
-─── RULES ──────────────────────────────────────────────────────────────────────
-  • Always use real /testbed paths — never /path/to/... placeholders.
-  • Read the full file before overwriting it — partial edits corrupt the file.
-  • One action per response; wait for the observation before acting again.
-  • Pipe long outputs through tail: <bash>cmd 2>&1 | tail -30</bash>
-────────────────────────────────────────────────────────────────────────────────"""
+Important rules:
+- Only modify source code files, not tests or configuration.
+- Do not use interactive editors (vi, nano). Use sed, awk, or python scripts to edit files.
+- Pipe long outputs through head or tail to keep them short.
+- Verify your fix by running relevant tests before finishing."""
 
 
 class MultiTurnExecutor:
@@ -491,39 +461,48 @@ class MultiTurnExecutor:
         )
 
     def _compute_ref_logprobs(self, rollouts: list[RolloutResult], tokenizer) -> list[Tensor]:
-        """Compute reference model log-probs for each rollout."""
+        """Compute reference model log-probs for each rollout, in mini-batches
+        to avoid OOM from large logits tensors (batch * seq_len * vocab_size)."""
         if self.ref_model is None:
             return [torch.zeros_like(r.old_log_probs) for r in rollouts]
 
         pad_id = tokenizer.pad_token_id if tokenizer and tokenizer.pad_token_id is not None else 0
-        input_ids = pad_sequences([r.full_ids for r in rollouts], pad_value=pad_id)
-        input_ids = input_ids.to(self.ref_model.device)
+        mini_bs = self.config.training.micro_batch_size
 
-        # Build attention_mask from actual lengths so EOS tokens are not
-        # masked out when pad_token_id == eos_token_id.
-        response_lengths = torch.tensor(
-            [r.response_len for r in rollouts], dtype=torch.long,
-        )
-        seq_lengths = torch.tensor(
-            [r.prompt_len + r.response_len for r in rollouts], dtype=torch.long,
-        )
-        attention_mask = torch.zeros(input_ids.shape, dtype=torch.long)
-        for i, sl in enumerate(seq_lengths):
-            attention_mask[i, :sl] = 1
-        attention_mask = attention_mask.to(self.ref_model.device)
+        result = [None] * len(rollouts)
+        for start in range(0, len(rollouts), mini_bs):
+            chunk = rollouts[start : start + mini_bs]
 
-        max_resp_len = max(r.response_len for r in rollouts)
+            input_ids = pad_sequences(
+                [r.full_ids for r in chunk],
+                pad_value=pad_id,
+            ).to(self.ref_model.device)
 
-        ref_lp = self.ref_model.forward_logprobs(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            response_lengths=response_lengths,
-            max_resp_len=max_resp_len,
-        )
+            # Build attention_mask from actual lengths so EOS tokens are not
+            # masked out when pad_token_id == eos_token_id.
+            response_lengths = torch.tensor(
+                [r.response_len for r in chunk], dtype=torch.long,
+            )
+            seq_lengths = torch.tensor(
+                [r.prompt_len + r.response_len for r in chunk], dtype=torch.long,
+            )
+            attention_mask = torch.zeros(input_ids.shape, dtype=torch.long)
+            for i, sl in enumerate(seq_lengths):
+                attention_mask[i, :sl] = 1
+            attention_mask = attention_mask.to(self.ref_model.device)
 
-        result = []
-        for i, r in enumerate(rollouts):
-            result.append(ref_lp[i, : r.response_len].cpu())
+            max_resp_len = max(r.response_len for r in chunk)
+
+            ref_lp = self.ref_model.forward_logprobs(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                response_lengths=response_lengths,
+                max_resp_len=max_resp_len,
+            )
+
+            for j, r in enumerate(chunk):
+                result[start + j] = ref_lp[j, : r.response_len].cpu()
+
         return result
 
     def _build_experience(
