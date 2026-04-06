@@ -289,10 +289,10 @@ def main() -> None:
                         help="Dataset split to evaluate on (default: test)")
     parser.add_argument("--num_samples", type=int, default=None,
                         help="Number of instances to evaluate (default: all)")
-    parser.add_argument("--max_turns", type=int, default=5,
-                        help="Max agent turns per instance (default: 5)")
-    parser.add_argument("--max_new_tokens", type=int, default=2048,
-                        help="Max tokens to generate per turn (default: 2048)")
+    parser.add_argument("--max_turns", type=int, default=10,
+                        help="Max agent turns per instance (default: 10)")
+    parser.add_argument("--max_new_tokens", type=int, default=512,
+                        help="Max tokens to generate per turn (default: 512)")
     parser.add_argument("--max_workers", type=int, default=8,
                         help="Parallel sandbox workers (default: 8)")
     parser.add_argument("--sandbox_timeout", type=int, default=120,

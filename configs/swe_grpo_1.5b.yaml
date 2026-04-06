@@ -6,7 +6,7 @@ model:
   trust_remote_code: true
 
 grpo:
-  n_samples_per_prompt: 2
+  n_samples_per_prompt: 4
   kl_coef: 0.01
   clip_range: 0.2
   max_grad_norm: 1.0
@@ -18,7 +18,7 @@ rollout:
   top_p: 0.95
 
 training:
-  lr: 5.0e-7
+  lr: 1.0e-6
   weight_decay: 0.01
   warmup_ratio: 0.03
   train_batch_size: 4
@@ -31,7 +31,7 @@ training:
   seed: 42
 
 swe:
-  max_turns: 5
+  max_turns: 10
   docker_image_prefix: swebench
   sandbox_timeout: 120
   max_concurrent_sandboxes: 8
