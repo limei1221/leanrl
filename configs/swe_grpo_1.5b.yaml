@@ -13,12 +13,12 @@ grpo:
 
 rollout:
   rollout_batch_size: 2
-  max_new_tokens: 512
+  max_new_tokens: 1024
   temperature: 0.7
   top_p: 0.95
 
 training:
-  lr: 1.0e-6
+  lr: 5.0e-7
   weight_decay: 0.01
   warmup_ratio: 0.03
   train_batch_size: 4
@@ -31,14 +31,14 @@ training:
   seed: 42
 
 swe:
-  max_turns: 10
+  max_turns: 15
   docker_image_prefix: swebench
   sandbox_timeout: 120
   max_concurrent_sandboxes: 8
   sandbox_memory_limit: 4g
   sandbox_cpu_limit: 2.0
 
-data:
+data:  # switch to princeton-nlp/SWE-bench/train or SWE-Gym/SWE-Gym/train if possible
   prompt_dataset: princeton-nlp/SWE-bench_Lite
   prompt_dataset_split: test
   input_key: problem_statement

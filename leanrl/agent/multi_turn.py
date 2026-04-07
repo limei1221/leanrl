@@ -22,7 +22,6 @@ from leanrl.utils.logging import logger
 
 # Action types the agent can emit
 ACTION_BASH = "bash"
-ACTION_EDIT = "edit"
 ACTION_DONE = "done"
 
 
@@ -30,110 +29,36 @@ def parse_action(text: str) -> tuple[str, str]:
     """Parse the model's output into an action type and content.
 
     Supports two formats:
-      1. Structured tags (used by GRPO-trained models):
+      1. Structured tags:
            <bash>command</bash>
-           <edit path="file.py">new content</edit>
            <done/>
-      2. Markdown code fences (used by base/chat models):
-           ```bash
+      2. Markdown code fences:
+           ```bash / ```sh
            command
-           ```
-           ```python  (written to a path extracted from surrounding text)
-           content
            ```
 
     Returns:
         (action_type, action_content) tuple.
     """
-    # --- Structured tag format ---
-
     # <bash>...</bash>
     bash_match = re.search(r"<bash>(.*?)</bash>", text, re.DOTALL)
     if bash_match:
         return ACTION_BASH, bash_match.group(1).strip()
 
-    # <edit path="...">...</edit>
-    edit_match = re.search(r'<edit\s+path="([^"]+)">(.*?)</edit>', text, re.DOTALL)
-    if edit_match:
-        path = edit_match.group(1)
-        content = edit_match.group(2)
-        # Strip markdown code fences if the model wrapped the content in ```python ... ```
-        content = re.sub(r'^\s*```[^\n]*\n', '', content)
-        content = re.sub(r'\n```\s*$', '', content)
-        return ACTION_EDIT, f"{path}\n{content}"
-
-    # --- Markdown code fence format ---
-    # Check fences BEFORE <done/> so that code fences inside ```bash blocks
-    # (e.g. a model writing ```bash\n<done/>\n```) don't trigger early exit.
-
-    # Models often produce multi-fence responses: a python code block with the
-    # file edit followed by a bash command to test it.  We must detect file-edit
-    # fences that appear *before* the first bash fence so the edit actually
-    # reaches disk.
-
+    # ```bash / ```sh fenced blocks
     bash_fence = re.search(r"```(?:bash|sh)\s*\n(.*?)```", text, re.DOTALL)
-
     if bash_fence:
-        # Check for python/code fences BEFORE the bash fence that look like
-        # file edits (substantial content + a /testbed path in preceding text).
-        pre_bash = text[: bash_fence.start()]
-        py_fences = list(re.finditer(r"```(?:python|py)?\s*\n(.*?)```", pre_bash, re.DOTALL))
-        if py_fences:
-            # Take the largest python block (most likely the complete file)
-            best = max(py_fences, key=lambda m: len(m.group(1)))
-            if len(best.group(1)) > 200:
-                # Search for a /testbed/*.py path anywhere before this block
-                all_paths = list(re.finditer(
-                    r"`?(/testbed/[^\s`\"']+\.(?:py|js|ts|rb|java|go|rs|c|cpp|h|txt|cfg|yml|yaml|toml|json|xml|html|css|sh))`?",
-                    text[: best.start()],
-                ))
-                if all_paths:
-                    path = all_paths[-1].group(1)
-                    content = best.group(1).strip()
-                    return ACTION_EDIT, f"{path}\n{content}"
-
         content = bash_fence.group(1).strip()
         # Model sometimes puts <done/> inside a bash block — treat as done signal
         if re.match(r"<done\s*/?>$", content, re.IGNORECASE):
             return ACTION_DONE, ""
         return ACTION_BASH, content
 
-    # Any other fenced block — try to find a file path hint in the preceding text
-    # e.g. "edit astropy/foo.py:" or "open astropy/foo.py"
-    lang_fence_match = re.search(r"```(\w*)\s*\n(.*?)```", text, re.DOTALL)
-    if lang_fence_match:
-        lang = lang_fence_match.group(1).lower()
-        content = lang_fence_match.group(2).strip()
-        # Look for a file path mentioned before the fence
-        path_hint = re.search(
-            r"(?:edit|open|write|create|modify|update|patch|file|implement|fix|correct)[^\n]*?`?([^\s`\"']+\.py)`?",
-            text[: lang_fence_match.start()],
-            re.IGNORECASE,
-        )
-        # Fallback: any /testbed path in the preceding text
-        if not path_hint:
-            all_paths = list(re.finditer(
-                r"`?(/testbed/[^\s`\"']+\.py)`?",
-                text[: lang_fence_match.start()],
-            ))
-            if all_paths:
-                path_hint = all_paths[-1]
-        if path_hint:
-            return ACTION_EDIT, f"{path_hint.group(1)}\n{content}"
-        # Python code blocks should be run with python, not bash
-        if lang in ("python", "py") or (
-            not lang and any(content.startswith(kw) for kw in ("import ", "from ", "def ", "class "))
-        ):
-            import shlex
-            return ACTION_BASH, f"python3 -c {shlex.quote(content)}"
-        # No path found — run as bash (e.g., a shell snippet without explicit lang tag)
-        return ACTION_BASH, content
-
-    # <done/> — checked last so code fences take priority
+    # <done/>
     if re.search(r"<done\s*/?>", text, re.IGNORECASE):
         return ACTION_DONE, ""
 
-    # Fall back: text with no code blocks and no done signal
+    # No recognizable action — treat as done
     return ACTION_DONE, ""
 
 
@@ -156,14 +81,17 @@ def format_observation(result: SandboxResult, max_chars: int = 4096) -> str:
 SYSTEM_PROMPT = """You are a helpful assistant that can interact with a computer shell to solve programming tasks.
 You will be given a bug report for a repository checked out at /testbed. Fix the bug by modifying the source code.
 
-For each response, include your reasoning, then one or more bash commands wrapped in <bash>...</bash> tags.
-When you are done, write <done/>.
+For each response, include your reasoning, then a bash command wrapped in <bash>...</bash> tags.
+When you are finished, write <done/>.
 
 Important rules:
-- Only modify source code files, not tests or configuration.
-- Do not use interactive editors (vi, nano). Use sed, awk, or python scripts to edit files.
+- Only bash actions are allowed. Use shell tools (sed, awk, cat, grep, python3 -c, etc.) to inspect and edit files.
+- Do not use interactive editors (vi, nano, emacs).
+- Each action runs in a fresh shell, so always use: cd /testbed && ...
 - Pipe long outputs through head or tail to keep them short.
-- Verify your fix by running relevant tests before finishing."""
+- Only modify source code files, not tests or configuration.
+- Run relevant tests before finishing to verify your fix.
+- Emit <done/> when finished."""
 
 
 class MultiTurnExecutor:
@@ -377,24 +305,9 @@ class MultiTurnExecutor:
                 # Model emitted no executable content; stop the trajectory.
                 break
 
-            if action_type == ACTION_BASH:
-                sandbox_result = sandbox.execute(action_content)
-            elif action_type == ACTION_EDIT:
-                lines = action_content.split("\n", 1)
-                if len(lines) == 2:
-                    file_path = lines[0]
-                    sandbox_result = sandbox.write_file(file_path, lines[1])
-                else:
-                    file_path = ""
-                    sandbox_result = SandboxResult("", "Invalid edit format", 1)
-            else:
-                # Unknown action type — stop rather than running raw text as bash
-                break
+            sandbox_result = sandbox.execute(action_content)
 
             observation = format_observation(sandbox_result)
-            # Provide explicit feedback for edits so the model knows it worked
-            if action_type == ACTION_EDIT and sandbox_result.exit_code == 0:
-                observation = f"File {file_path} written successfully."
             obs_content = f"[Observation]\n{observation}\n\nContinue fixing the issue."
 
             # Add observation as a new user turn to maintain proper chat format

@@ -39,19 +39,22 @@ def patch_swebench_constants() -> None:
     # Fix 1: sklearn — remove the obsolete --no-use-pep517 flag.
     src = src.replace("--no-use-pep517 ", "")
 
-    # Fix 2: pylint — add --no-build-isolation to `pip install -e .`
-    # only inside the SPECS_PYLINT block.
-    pylint_start = src.find("SPECS_PYLINT")
-    if pylint_start != -1:
-        m = re.search(r"\nSPECS_(?!PYLINT)", src[pylint_start + 1:])
-        pylint_end = pylint_start + 1 + m.start() if m else len(src)
-        block = src[pylint_start:pylint_end]
+    # Fix 2: pylint/astroid — add --no-build-isolation to `pip install -e .`
+    # inside SPECS_PYLINT and SPECS_ASTROID blocks (their setuptools backends
+    # lack the PEP 660 build_editable hook).
+    for spec_name in ("SPECS_PYLINT", "SPECS_ASTROID"):
+        spec_start = src.find(spec_name)
+        if spec_start == -1:
+            continue
+        m = re.search(rf"\nSPECS_(?!{spec_name.removeprefix('SPECS_')})", src[spec_start + 1:])
+        spec_end = spec_start + 1 + m.start() if m else len(src)
+        block = src[spec_start:spec_end]
         if "--no-build-isolation" not in block:
             block = block.replace(
                 '"install": "python -m pip install -e .",',
                 '"install": "python -m pip install --no-build-isolation -e .",',
             )
-            src = src[:pylint_start] + block + src[pylint_end:]
+            src = src[:spec_start] + block + src[spec_end:]
 
     if src != original:
         with open(py_path, "w") as f:
@@ -131,13 +134,13 @@ def patch_swebench_constants() -> None:
 
 # ── Build images ─────────────────────────────────────────────────────────────
 
-def build_all(max_samples: int, max_workers: int, retries: int) -> bool:
+def build_all(max_samples: int, max_workers: int, retries: int, split: str = "test") -> bool:
     """Build all SWE-bench Lite instance images. Returns True if all succeed."""
     import docker
     from datasets import load_dataset
     from swebench.harness.docker_build import build_instance_images
 
-    dataset = list(load_dataset("princeton-nlp/SWE-bench_Lite", split="test"))
+    dataset = list(load_dataset("princeton-nlp/SWE-bench_Lite", split=split))
     if max_samples > 0:
         dataset = dataset[:max_samples]
 
@@ -199,6 +202,8 @@ def main() -> None:
     parser.add_argument("--max-samples", type=int, default=0)
     parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--retries", type=int, default=2)
+    parser.add_argument("--split", type=str, default="test",
+                        help="Dataset split to build (default: test)")
     parser.add_argument("--patch-only", action="store_true",
                         help="Only patch swebench constants, don't build")
     args = parser.parse_args()
@@ -208,7 +213,7 @@ def main() -> None:
     if args.patch_only:
         return
 
-    ok = build_all(args.max_samples, args.max_workers, args.retries)
+    ok = build_all(args.max_samples, args.max_workers, args.retries, split=args.split)
     sys.exit(0 if ok else 1)
 
 

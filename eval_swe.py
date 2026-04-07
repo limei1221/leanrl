@@ -27,8 +27,8 @@ from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
-from leanrl.agent.multi_turn import SYSTEM_PROMPT, parse_action, format_observation, ACTION_DONE, ACTION_BASH, ACTION_EDIT
-from leanrl.agent.sandbox import DockerSandbox, TaskInstance, SandboxResult
+from leanrl.agent.multi_turn import SYSTEM_PROMPT, parse_action, format_observation, ACTION_DONE, ACTION_BASH
+from leanrl.agent.sandbox import DockerSandbox, TaskInstance
 from leanrl.reward.swe_reward import compute_swe_reward
 
 
@@ -161,29 +161,13 @@ def run_trajectory(
                     print(f"  → empty action_content, stopping")
                 break
 
-            if action_type == ACTION_BASH:
-                result = sandbox.execute(action_content)
-            elif action_type == ACTION_EDIT:
-                lines = action_content.split("\n", 1)
-                if len(lines) == 2:
-                    file_path = lines[0]
-                    result = sandbox.write_file(file_path, lines[1])
-                else:
-                    file_path = ""
-                    result = SandboxResult("", "Invalid edit format", 1)
-            else:
-                # Unknown action type — skip rather than running raw text as bash
-                break
+            result = sandbox.execute(action_content)
 
             if verbose:
                 obs_preview = (result.stdout + result.stderr)[:300]
                 print(f"  Sandbox exit={result.exit_code}: {obs_preview!r}")
 
             observation = format_observation(result)
-
-            # Provide explicit feedback for edits so the model knows it worked
-            if action_type == ACTION_EDIT and result.exit_code == 0:
-                observation = f"File {file_path} written successfully."
 
             # Add observation as a new user turn to maintain proper chat format
             messages.append({"role": "user", "content": f"[Observation]\n{observation}\n\nContinue fixing the issue."})
@@ -283,16 +267,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate a model on SWE-bench Lite.")
     parser.add_argument("--model_name_or_path", required=True,
                         help="HuggingFace model ID or local path")
+    # switch to princeton-nlp/SWE-bench_Verified if possible
     parser.add_argument("--dataset", default="princeton-nlp/SWE-bench_Lite",
                         help="SWE-bench dataset name (default: princeton-nlp/SWE-bench_Lite)")
     parser.add_argument("--split", default="test",
                         help="Dataset split to evaluate on (default: test)")
     parser.add_argument("--num_samples", type=int, default=None,
                         help="Number of instances to evaluate (default: all)")
-    parser.add_argument("--max_turns", type=int, default=10,
-                        help="Max agent turns per instance (default: 10)")
-    parser.add_argument("--max_new_tokens", type=int, default=512,
-                        help="Max tokens to generate per turn (default: 512)")
+    parser.add_argument("--max_turns", type=int, default=15,
+                        help="Max agent turns per instance (default: 15)")
+    parser.add_argument("--max_new_tokens", type=int, default=1024,
+                        help="Max tokens to generate per turn (default: 1024)")
     parser.add_argument("--max_workers", type=int, default=8,
                         help="Parallel sandbox workers (default: 8)")
     parser.add_argument("--sandbox_timeout", type=int, default=120,

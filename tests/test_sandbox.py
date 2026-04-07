@@ -39,7 +39,7 @@ class TestTaskInstance:
 class TestDockerSandbox:
     def test_image_name_default(self, sample_task):
         sandbox = DockerSandbox(sample_task)
-        assert "swebench" in sandbox.image_name
+        assert "sweb" in sandbox.image_name
         assert "django__django" in sandbox.image_name
 
     def test_image_name_custom(self, sample_task):
@@ -67,13 +67,12 @@ class TestParseAction:
         assert action_type == ACTION_BASH
         assert content == "ls -la"
 
-    def test_edit_action(self):
-        from leanrl.agent.multi_turn import parse_action, ACTION_EDIT
+    def test_edit_action_not_supported(self):
+        from leanrl.agent.multi_turn import parse_action, ACTION_DONE
 
         text = '<edit path="foo.py">print("hello")</edit>'
-        action_type, content = parse_action(text)
-        assert action_type == ACTION_EDIT
-        assert "foo.py" in content
+        action_type, _ = parse_action(text)
+        assert action_type == ACTION_DONE
 
     def test_done_action(self):
         from leanrl.agent.multi_turn import parse_action, ACTION_DONE
@@ -81,12 +80,11 @@ class TestParseAction:
         action_type, _ = parse_action("<done/>")
         assert action_type == ACTION_DONE
 
-    def test_fallback_bash(self):
-        from leanrl.agent.multi_turn import parse_action, ACTION_BASH
+    def test_plain_text_is_done(self):
+        from leanrl.agent.multi_turn import parse_action, ACTION_DONE
 
-        action_type, content = parse_action("git diff")
-        assert action_type == ACTION_BASH
-        assert content == "git diff"
+        action_type, _ = parse_action("git diff")
+        assert action_type == ACTION_DONE
 
 
 class TestMathReward:

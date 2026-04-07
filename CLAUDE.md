@@ -56,6 +56,7 @@ bash scripts/train_swe.sh
 ```bash
 python eval_math.py --model_name_or_path <checkpoint>/final --batch_size 128
 python eval_swe.py --model_name_or_path <checkpoint>/final --num_gpus 1
+python eval_swe_oracle.py  # golden patch baseline (resolve_rate: 0.86)
 ```
 
 ## Architecture
@@ -113,4 +114,4 @@ All training hyperparameters are in YAML configs under `configs/`. Key sections:
 - `infra`: `deepspeed_stage` (2 or 3), `offload_optimizer`, `vllm_enable_sleep`
 - `swe` (SWE-bench only): `max_turns`, `sandbox_timeout`, `max_concurrent_sandboxes`
 
-Baseline GSM8K accuracy for Qwen2.5-1.5B-Instruct after training: ~69.8%.
+Baseline GSM8K accuracy for Qwen2.5-1.5B-Instruct: 66.9%, best after training (step 100): 69.7%.

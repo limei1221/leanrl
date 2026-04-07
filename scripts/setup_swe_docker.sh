@@ -5,8 +5,9 @@
 # then builds sweb.eval.x86_64.{instance_id}:latest images used by the sandbox.
 #
 # Usage:
-#   bash scripts/setup_swe_docker.sh                    # all 300 Lite instances
-#   MAX_SAMPLES=50 bash scripts/setup_swe_docker.sh     # first 50 instances only
+#   bash scripts/setup_swe_docker.sh                    # all test instances
+#   bash scripts/setup_swe_docker.sh dev                # all dev instances
+#   MAX_SAMPLES=50 bash scripts/setup_swe_docker.sh     # first 50 test instances
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,10 +21,12 @@ fi
 
 pip install -q swebench 2>/dev/null || true
 
+SPLIT="${1:-test}"
 MAX_WORKERS="${SWE_MAX_WORKERS:-4}"
 MAX_SAMPLES="${MAX_SAMPLES:-0}"
 RETRY_COUNT="${RETRY_COUNT:-2}"
 
+echo "Split:        $SPLIT"
 echo "Max workers:  $MAX_WORKERS"
 echo "Max samples:  $MAX_SAMPLES (0=all)"
 echo "Retry count:  $RETRY_COUNT"
@@ -37,6 +40,7 @@ python3 "$SCRIPT_DIR/setup_swe_docker.py" --patch-only
 # Step 2: Build images (fresh import picks up patched files).
 echo ""
 python3 "$SCRIPT_DIR/setup_swe_docker.py" \
+    --split "$SPLIT" \
     --max-workers "$MAX_WORKERS" \
     --max-samples "$MAX_SAMPLES" \
     --retries "$RETRY_COUNT"
