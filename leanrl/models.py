@@ -102,6 +102,8 @@ def get_deepspeed_config(
         config["zero_optimization"].update({
             "stage3_prefetch_bucket_size": 5e7,
             "stage3_param_persistence_threshold": 1e5,
+            **({"offload_param": {"device": "cpu", "pin_memory": True}}
+               if infra.offload_param else {}),
         })
     return config
 
@@ -203,6 +205,26 @@ class PolicyModel:
             max_resp_len=max_resp_len,
         )
         return resp_lp, resp_entropy
+
+    def offload_to_cpu(self):
+        """Move DeepSpeed engine parameters to CPU to free GPU for vLLM."""
+        self.engine.module.to("cpu")
+        if hasattr(self.engine, "optimizer") and self.engine.optimizer is not None:
+            for state in self.engine.optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.cpu()
+        torch.cuda.empty_cache()
+
+    def reload_to_gpu(self):
+        """Move DeepSpeed engine parameters back to GPU."""
+        device = torch.device("cuda")
+        self.engine.module.to(device)
+        if hasattr(self.engine, "optimizer") and self.engine.optimizer is not None:
+            for state in self.engine.optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(device)
 
     def train_step(self, loss: Tensor) -> dict:
         """Run a single backward + optimizer step via DeepSpeed."""

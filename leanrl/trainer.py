@@ -47,16 +47,31 @@ class GRPOTrainer:
     def _setup_models(self):
         """Load policy, reference, and rollout models."""
         cfg = self.config
+        tp_size = cfg.infra.vllm_tensor_parallel_size
 
-        # Rollout engine (vLLM on dedicated GPU)
+        # Colocated mode: vLLM TP spans the training GPU, so sleep/wake is
+        # mandatory to time-share GPU memory between rollout and training.
+        self._colocated = tp_size > 1
+        if self._colocated:
+            logger.info(
+                f"Colocated mode: vLLM TP={tp_size} shares GPUs with trainer, "
+                "sleep/wake will be used between phases"
+            )
+
+        # Rollout engine (vLLM on GPU(s) — claims num_gpus = tensor_parallel_size)
         from leanrl.rollout import RolloutEngine
 
-        self.rollout_engine = RolloutEngine.remote(
+        self.rollout_engine = RolloutEngine.options(num_gpus=tp_size).remote(
             model_path=cfg.model.model_name_or_path,
             rollout_cfg=cfg.rollout,
             infra_cfg=cfg.infra,
         )
-        logger.info("Rollout engine created")
+        logger.info(f"Rollout engine created (TP={tp_size}, num_gpus={tp_size})")
+
+        # In colocated mode, vLLM must sleep before we can load models on GPU 0.
+        if self._colocated:
+            ray.get(self.rollout_engine.sleep.remote())
+            logger.info("vLLM sleeping so trainer can load models on shared GPU")
 
         # Policy model (DeepSpeed on training GPU)
         from leanrl.models import PolicyModel, ReferenceModel
@@ -172,10 +187,20 @@ class GRPOTrainer:
                     break
 
                 step_start = time.time()
-
-                # --- Rollout phase (vLLM GPU active, training GPU idle) ---
                 prompts = batch["prompts"]
                 labels = batch["labels"]
+                use_sleep = self._colocated or self.config.infra.vllm_enable_sleep
+
+                # --- Rollout phase (vLLM GPU active, training GPU idle) ---
+                if self._colocated:
+                    # Offload trainer models to free GPU for vLLM
+                    self.ref_model.offload_to_cpu()
+                    self.policy.offload_to_cpu()
+                    torch.cuda.empty_cache()
+                    try:
+                        ray.get(self.rollout_engine.wake_up.remote())
+                    except Exception:
+                        pass
 
                 experience = self.executor.execute(
                     prompts=prompts,
@@ -184,22 +209,32 @@ class GRPOTrainer:
                 )
 
                 # --- Training phase (vLLM sleeping, training GPU active) ---
-                if self.config.infra.vllm_enable_sleep:
+                if use_sleep:
                     try:
                         ray.get(self.rollout_engine.sleep.remote())
                     except Exception:
                         pass
 
-                # Free GPU memory held by the frozen reference model
+                if self._colocated:
+                    # Reload trainer models after vLLM frees GPU memory
+                    self.policy.reload_to_gpu()
+                    self.ref_model.reload_to_gpu()
+
+                # Free reference model GPU memory during training
                 self.ref_model.offload_to_cpu()
 
                 step_metrics = self._train_on_experience(experience)
 
-                # Bring reference model back for next rollout
-                self.ref_model.reload_to_gpu()
+                # Bring reference model back for next rollout (non-colocated only;
+                # colocated mode reloads at the start of the next rollout phase)
+                if not self._colocated:
+                    self.ref_model.reload_to_gpu()
 
                 # --- Sync weights back to vLLM ---
-                if self.config.infra.vllm_enable_sleep:
+                if use_sleep and not self._colocated:
+                    # Non-colocated: wake vLLM before sync.
+                    # Colocated: vLLM stays asleep; weight update works on
+                    # sleeping vLLM, and wake happens at next rollout phase.
                     try:
                         ray.get(self.rollout_engine.wake_up.remote())
                     except Exception:
@@ -207,8 +242,7 @@ class GRPOTrainer:
 
                 state_dict = self.policy.get_state_dict_for_vllm()
                 future = self.rollout_engine.update_weights.remote(state_dict)
-                del state_dict  # Ray serializes synchronously before returning the future,
-                                # so the trainer-side copy can be freed immediately
+                del state_dict
                 ray.get(future)
 
                 # --- Logging ---
