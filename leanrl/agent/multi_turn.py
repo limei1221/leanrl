@@ -176,9 +176,11 @@ class MultiTurnExecutor:
             all_rollouts, rewards, advantages, ref_log_probs_list, tokenizer
         )
 
+        # pass_rate reflects test success (reward > 0.3 shaping cap), not shaping
         logger.info(
             f"Multi-turn: {len(tasks)} tasks, {len(all_rollouts)} trajectories, "
-            f"reward_mean={rewards.mean():.3f}, pass_rate={(rewards > 0).float().mean():.3f}"
+            f"reward_mean={rewards.mean():.3f}, "
+            f"pass_rate={(rewards > 0.3).float().mean():.3f}"
         )
         return experience
 
@@ -234,8 +236,10 @@ class MultiTurnExecutor:
                 continue
 
             try:
-                trajectory = self._run_single_trajectory(task, sandbox, max_turns, tokenizer)
-                reward, info = compute_swe_reward(sandbox, task)
+                trajectory, traj_stats = self._run_single_trajectory(
+                    task, sandbox, max_turns, tokenizer
+                )
+                reward, info = compute_swe_reward(sandbox, task, traj_stats)
                 rollouts.append(trajectory)
                 rewards.append(reward)
             except Exception as e:
@@ -253,11 +257,15 @@ class MultiTurnExecutor:
         sandbox: DockerSandbox,
         max_turns: int,
         tokenizer,
-    ) -> RolloutResult:
+    ) -> tuple[RolloutResult, dict]:
         """Run a single multi-turn trajectory.
 
         Accumulates all generated tokens into a single RolloutResult,
         with a response_mask that marks only model-generated tokens.
+
+        Returns:
+            (rollout, trajectory_stats) where trajectory_stats contains
+            signals for dense reward shaping.
         """
         # Build initial prompt
         messages = build_initial_prompt(task.problem_statement)
@@ -267,9 +275,21 @@ class MultiTurnExecutor:
         all_response_ids: list[int] = []
         all_log_probs: list[float] = []
         all_response_mask: list[float] = []
+        all_response_texts: list[str] = []
         prompt_ids_tensor = None
 
+        # Track trajectory-level signals for dense reward
+        traj_stats = {
+            "total_turns": 0,
+            "valid_actions": 0,
+            "successful_actions": 0,
+            "files_modified": False,
+            "used_done": False,
+        }
+
         for turn in range(max_turns):
+            traj_stats["total_turns"] = turn + 1
+
             if tokenizer and hasattr(tokenizer, "apply_chat_template"):
                 conversation = tokenizer.apply_chat_template(
                     messages, tokenize=False, add_generation_prompt=True
@@ -303,16 +323,21 @@ class MultiTurnExecutor:
             action_type, action_content = parse_action(result.response_text)
 
             # Add model response to message history
+            all_response_texts.append(result.response_text)
             messages.append({"role": "assistant", "content": result.response_text})
 
             if action_type == ACTION_DONE:
+                traj_stats["used_done"] = True
                 break
 
             if not action_content.strip():
                 # Model emitted no executable content; stop the trajectory.
                 break
 
+            traj_stats["valid_actions"] += 1
             sandbox_result = sandbox.execute(action_content)
+            if sandbox_result.exit_code == 0:
+                traj_stats["successful_actions"] += 1
 
             observation = format_observation(sandbox_result)
             obs_content = f"[Observation]\n{observation}\n\nContinue fixing the issue."
@@ -333,9 +358,14 @@ class MultiTurnExecutor:
                 all_log_probs.extend([0.0] * len(obs_tokens))
                 all_response_mask.extend([0.0] * len(obs_tokens))
 
+        # Check if the model modified any source files
+        diff_result = sandbox.execute("cd /testbed && git diff --name-only")
+        if diff_result.exit_code == 0 and diff_result.stdout.strip():
+            traj_stats["files_modified"] = True
+
         # Assemble final RolloutResult
         if prompt_ids_tensor is None:
-            return self._make_empty_rollout(task, tokenizer)
+            return self._make_empty_rollout(task, tokenizer), traj_stats
 
         response_ids = torch.tensor(all_response_ids, dtype=torch.long)
         old_log_probs = torch.tensor(all_log_probs, dtype=torch.float32)
@@ -347,12 +377,12 @@ class MultiTurnExecutor:
             response_ids=response_ids,
             full_ids=full_ids,
             old_log_probs=old_log_probs,
-            response_text=conversation,
+            response_text="\n".join(all_response_texts),
             prompt_text=task.problem_statement,
             prompt_len=len(prompt_ids_tensor),
             response_len=len(response_ids),
             response_mask=response_mask,
-        )
+        ), traj_stats
 
     def _make_empty_rollout(self, task: TaskInstance, tokenizer) -> RolloutResult:
         """Create an empty rollout for failed trajectories."""
@@ -443,6 +473,7 @@ class MultiTurnExecutor:
             advantages=advantages,
             ref_log_probs_list=ref_log_probs_list,
             pad_token_id=pad_id,
+            max_seq_len=self.config.training.max_seq_len,
         )
 
     def cleanup(self):

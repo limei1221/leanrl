@@ -84,6 +84,7 @@ def run_trajectory(
         last_action = None
         repeat_count = 0
 
+        turn = -1
         for turn in range(max_turns):
             conversation = tokenizer.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
@@ -172,6 +173,7 @@ def run_trajectory(
         # Use a longer timeout for the final test scoring run.
         sandbox.timeout = test_timeout
         reward, info = compute_swe_reward(sandbox, task)
+        info["num_turns"] = turn + 1
 
     return reward, info
 
@@ -267,14 +269,16 @@ def main() -> None:
     # switch to princeton-nlp/SWE-bench_Verified if possible
     parser.add_argument("--dataset", default="princeton-nlp/SWE-bench_Lite",
                         help="SWE-bench dataset name (default: princeton-nlp/SWE-bench_Lite)")
-    parser.add_argument("--split", default="dev",
-                        help="Dataset split to evaluate on (default: dev)")
-    parser.add_argument("--num_samples", type=int, default=None,
-                        help="Number of instances to evaluate (default: all)")
-    parser.add_argument("--max_turns", type=int, default=15,
-                        help="Max agent turns per instance (default: 15)")
-    parser.add_argument("--max_new_tokens", type=int, default=1024,
-                        help="Max tokens to generate per turn (default: 1024)")
+    parser.add_argument("--split", default="test",
+                        help="Dataset split to evaluate on (default: test)")
+    parser.add_argument("--num_samples", type=int, default=15,
+                        help="Number of instances to evaluate (default: 15)")
+    parser.add_argument("--random_seed", type=int, default=42,
+                        help="Random seed for sampling instances (default: None = no shuffle)")
+    parser.add_argument("--max_turns", type=int, default=20,
+                        help="Max agent turns per instance (default: 20)")
+    parser.add_argument("--max_new_tokens", type=int, default=2048,
+                        help="Max tokens to generate per turn (default: 2048)")
     parser.add_argument("--max_workers", type=int, default=8,
                         help="Parallel sandbox workers (default: 8)")
     parser.add_argument("--sandbox_timeout", type=int, default=120,
@@ -295,7 +299,12 @@ def main() -> None:
     print(f"Loading {args.dataset} ({args.split}) ...")
     dataset = load_dataset(args.dataset, split=args.split)
     if args.num_samples is not None:
-        dataset = dataset.select(range(min(args.num_samples, len(dataset))))
+        if args.random_seed is not None:
+            dataset = dataset.shuffle(seed=args.random_seed).select(
+                range(min(args.num_samples, len(dataset)))
+            )
+        else:
+            dataset = dataset.select(range(min(args.num_samples, len(dataset))))
 
     tasks = [build_task(row) for row in dataset]
     print(f"Evaluating on {len(tasks)} instances.")

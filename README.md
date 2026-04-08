@@ -10,7 +10,8 @@ Supported tasks:
 
 - GRPO training with clipped policy loss and KL regularization
 - vLLM rollout engine as a Ray actor with sleep-mode GPU sharing
-- DeepSpeed ZeRO-2/3 for memory-efficient policy training
+- DeepSpeed for memory-efficient policy training (optimizer CPU offload on single GPU, ZeRO-2/3 sharding on multi-GPU)
+- Async rollout prefetching: overlaps next batch generation (GPU 1) with training (GPU 0)
 - Docker sandboxes for safe, isolated code execution
 
 ## Quick Start
@@ -41,7 +42,7 @@ bash scripts/train_swe.sh
 ```
 Trainer (orchestrator)
 ├── RolloutEngine (vLLM, dedicated GPU via Ray)
-├── PolicyModel (DeepSpeed ZeRO, training GPU)
+├── PolicyModel (DeepSpeed, training GPU)
 ├── ReferenceModel (frozen, training GPU)
 └── RewardRouter
     ├── MathReward (rule-based verification)
@@ -59,8 +60,19 @@ Each training step follows the GRPO loop:
 
 | GPU | During Rollout | During Training |
 |-----|----------------|-----------------|
-| 0   | Idle           | Policy + Reference (DeepSpeed ZeRO-2) |
+| 0   | Idle           | Policy + Reference (DeepSpeed, optimizer offloaded to CPU) |
 | 1   | vLLM serving   | vLLM sleeping, memory released |
+
+### Async Rollout Prefetching
+
+When `training.async_prefetch: true` and `infra.vllm_enable_sleep: false` (dedicated GPUs), the trainer overlaps the next batch's vLLM generation on GPU 1 with training on GPU 0:
+
+```
+Sequential:  [Generate N] [Train N] [Sync] [Generate N+1] [Train N+1] ...
+Async:       [Generate N] [Train N + Generate N+1] [Sync] [Train N+1 + Generate N+2] ...
+```
+
+This saves up to `min(T_generate, T_train)` per step. The prefetched rollouts use weights that are one step stale, which is handled by PPO/GRPO importance sampling. Only available for single-turn (math) tasks.
 
 ## Configuration
 
@@ -72,9 +84,8 @@ All hyperparameters live in YAML files under `configs/`. See `leanrl/utils/confi
 # Math (GSM8K/test)
 python eval_math.py --model_name_or_path <checkpoint>/final --batch_size 128
 
-# SWE-bench (SWE-bench_Lite/dev, switch to princeton-nlp/SWE-bench_Verified if possible)
-bash scripts/setup_swe_docker.sh dev
-python eval_swe.py --model_name_or_path <checkpoint>/final --num_gpus 1
+# SWE-bench (SWE-bench_Lite/test, switch to princeton-nlp/SWE-bench_Verified if possible)
+python eval_swe.py --model_name_or_path <checkpoint>/final
 python eval_swe_oracle.py  # golden-patch baseline (resolve rate: 0.8567 257/300)
 ```
 
@@ -92,15 +103,15 @@ Hardware: 2× RTX 4090 (24 GB each), 197 GB RAM, 15 CPU cores, 485 GB disk. Pyth
 | ref2 | Qwen/Qwen2.5-Math-7B-Instruct | 94.1%  (1241/1319) |
 
 ### Coding
+max_turns=15, max_new_tokens=2048
 
 |  | Model | Resolve Rate |
 |------------|-------|--------------|
-| baseline | Qwen/Qwen2.5-1.5B-Instruct | |
-| ref1 | Qwen/Qwen2.5-Coder-1.5B-Instruct | |
+| baseline | Qwen/Qwen2.5-Coder-1.5B-Instruct |  |
 | ref2 | Qwen/Qwen2.5-Coder-3B-Instruct | |
 | ref3 | Qwen/Qwen2.5-Coder-7B-Instruct | |
-| ref4 | ricdomolm/mini-coder-1.7b | |
-| ref5 | ricdomolm/mini-coder-4b | |
+| ref4 | ricdomolm/mini-coder-1.7b | 6.7%  (1/15) |
+| ref5 | ricdomolm/mini-coder-4b |  |
 
 ## License
 

@@ -94,9 +94,44 @@ def _ensure_roman_package(sandbox: "DockerSandbox") -> None:  # type: ignore[nam
             sandbox.write_file(f"{site}/roman.py", _ROMAN_PY)
 
 
+def compute_trajectory_reward(trajectory_stats: dict) -> float:
+    """Compute a dense shaped reward from trajectory-level signals.
+
+    Rewards intermediate progress so the model gets nonzero signal even when
+    it doesn't pass any tests.  Each component is in [0, 1] and weighted so
+    that the total shaping reward is in [0, 0.3] — always dominated by test
+    pass rewards (up to 1.0).
+
+    Components:
+        valid_action_rate:  fraction of turns that produced a parseable action (×0.05)
+        success_rate:       fraction of actions that executed with exit_code 0 (×0.05)
+        files_modified:     whether the model modified any source files       (×0.1)
+        used_done:          whether the model signalled <done/>               (×0.1)
+    """
+    turns = trajectory_stats.get("total_turns", 0)
+    if turns == 0:
+        return 0.0
+
+    valid = trajectory_stats.get("valid_actions", 0)
+    success = trajectory_stats.get("successful_actions", 0)
+    modified = trajectory_stats.get("files_modified", False)
+    used_done = trajectory_stats.get("used_done", False)
+
+    valid_rate = valid / turns
+    success_rate = success / max(valid, 1)
+
+    return (
+        0.05 * valid_rate
+        + 0.05 * success_rate
+        + 0.1 * float(modified)
+        + 0.1 * float(used_done)
+    )
+
+
 def compute_swe_reward(
     sandbox: DockerSandbox,
     task: TaskInstance,
+    trajectory_stats: dict | None = None,
 ) -> tuple[float, dict]:
     """Evaluate whether the current sandbox state passes the SWE-bench criteria.
 
@@ -104,12 +139,16 @@ def compute_swe_reward(
     1. All FAIL_TO_PASS tests now pass (the fix works)
     2. All PASS_TO_PASS tests still pass (no regressions)
 
+    When trajectory_stats is provided, adds a small shaped reward for
+    intermediate progress (valid actions, successful execution, file edits).
+
     Args:
         sandbox: active Docker sandbox with the current code state.
         task: TaskInstance with test specifications.
+        trajectory_stats: optional dict with trajectory-level signals.
 
     Returns:
-        reward: 1.0 if all criteria met, 0.0 otherwise.
+        reward: test-based reward + optional shaping bonus.
         info: dict with detailed test results for logging.
     """
     info = {
@@ -117,8 +156,16 @@ def compute_swe_reward(
         "pass_to_pass_total": len(task.pass_to_pass),
         "fail_to_pass_passed": 0,
         "pass_to_pass_passed": 0,
+        "shaping_reward": 0.0,
+        "test_reward": 0.0,
         "error": None,
     }
+
+    # Compute trajectory shaping reward
+    shaping = 0.0
+    if trajectory_stats is not None:
+        shaping = compute_trajectory_reward(trajectory_stats)
+    info["shaping_reward"] = shaping
 
     # Ensure the 'roman' package exists (missing from some sphinx containers)
     _ensure_roman_package(sandbox)
@@ -134,29 +181,28 @@ def compute_swe_reward(
             result = sandbox.apply_patch(task.test_patch)
             if result.exit_code != 0:
                 info["error"] = f"test_patch failed to apply: {result.stderr[:200]}"
-                return 0.0, info
+                return shaping, info
 
     # Run FAIL_TO_PASS tests
+    f2p_fraction = 0.0
     if task.fail_to_pass:
         result = sandbox.run_tests(task.fail_to_pass)
         if result.timed_out:
             info["error"] = "fail_to_pass tests timed out"
-            return 0.0, info
+            return shaping, info
 
         test_results = parse_pytest_results(result.stdout + result.stderr)
         passed = sum(1 for t in task.fail_to_pass if test_results.get(t) == "passed")
         info["fail_to_pass_passed"] = passed
-
-        for test in task.fail_to_pass:
-            if test_results.get(test) != "passed":
-                return 0.0, info
+        f2p_fraction = passed / len(task.fail_to_pass)
 
     # Run PASS_TO_PASS tests (regression check)
+    has_regression = False
     if task.pass_to_pass:
         result = sandbox.run_tests(task.pass_to_pass)
         if result.timed_out:
             info["error"] = "pass_to_pass tests timed out"
-            return 0.0, info
+            return shaping, info
 
         test_results = parse_pytest_results(result.stdout + result.stderr)
         passed = sum(1 for t in task.pass_to_pass if test_results.get(t) == "passed")
@@ -168,9 +214,14 @@ def compute_swe_reward(
             # treat as skipped rather than failed to avoid false negatives caused
             # by dataset tests that were added after the base commit.
             if status == "failed" or status == "error":
-                return 0.0, info
+                has_regression = True
+                break
 
-    return 1.0, info
+    # Any regression on pass_to_pass tests zeroes the test reward (but keeps shaping)
+    test_reward = 0.0 if has_regression else f2p_fraction
+    info["test_reward"] = test_reward
+
+    return test_reward + shaping, info
 
 
 def compute_swe_rewards_batch(

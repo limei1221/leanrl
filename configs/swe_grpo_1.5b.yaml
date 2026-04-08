@@ -1,40 +1,42 @@
 task: swe
 
 model:
-  model_name_or_path: Qwen/Qwen2.5-1.5B-Instruct
+  model_name_or_path: ricdomolm/mini-coder-1.7b
   dtype: bf16
   trust_remote_code: true
 
 grpo:
   n_samples_per_prompt: 4
-  kl_coef: 0.01
+  kl_coef: 0.02
   clip_range: 0.2
   max_grad_norm: 1.0
 
 rollout:
-  rollout_batch_size: 2
-  max_new_tokens: 1024
+  rollout_batch_size: 4
+  max_new_tokens: 512
   temperature: 0.7
   top_p: 0.95
 
 training:
-  lr: 5.0e-7
+  lr: 1.0e-6
   weight_decay: 0.01
   warmup_ratio: 0.03
-  train_batch_size: 4
+  train_batch_size: 8
   micro_batch_size: 1
   num_epochs: 1
   save_steps: 50
   logging_steps: 1
   gradient_checkpointing: true
+  max_seq_len: 4096
   num_ppo_epochs: 1
+  save_best_only: false
   seed: 42
 
 swe:
-  max_turns: 15
+  max_turns: 10
   docker_image_prefix: swebench
   sandbox_timeout: 120
-  max_concurrent_sandboxes: 8
+  max_concurrent_sandboxes: 4
   sandbox_memory_limit: 4g
   sandbox_cpu_limit: 2.0
 
@@ -44,6 +46,7 @@ data:  # switch to princeton-nlp/SWE-bench/train or SWE-Gym/SWE-Gym/train if pos
   input_key: problem_statement
   label_key: instance_id
   max_samples: -1
+  max_samples_to_eval: 16
 
 infra:
   vllm_num_engines: 1

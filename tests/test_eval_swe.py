@@ -1,5 +1,7 @@
 import json
+import sys
 
+import eval_swe
 from eval_swe import build_task
 from leanrl.agent.sandbox import TaskInstance
 
@@ -57,3 +59,45 @@ def test_build_task_uses_defaults_for_optional_fields():
     assert task.test_patch == ""
     assert task.fail_to_pass == []
     assert task.pass_to_pass == []
+
+
+class _DummyDataset(list):
+    def shuffle(self, seed):
+        return self
+
+    def select(self, indices):
+        return _DummyDataset([self[i] for i in list(indices)])
+
+
+def test_main_uses_training_aligned_swe_defaults(monkeypatch):
+    defaults = {
+        "dataset": "custom/swe",
+        "split": "test",
+        "max_turns": 15,
+        "max_new_tokens": 1024,
+    }
+    dataset = _DummyDataset([
+        {"instance_id": "repo-1", "problem_statement": "Fix the bug"},
+    ])
+    called = {}
+
+    monkeypatch.setattr(eval_swe, "_load_default_swe_eval_settings", lambda: defaults)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["eval_swe.py", "--model_name_or_path", "stub-model", "--output_json", ""],
+    )
+    monkeypatch.setattr(eval_swe, "load_dataset", lambda dataset_name, split: dataset)
+    monkeypatch.setattr(eval_swe, "build_task", lambda row: row)
+
+    def fake_evaluate(**kwargs):
+        called.update(kwargs)
+        return 0.0, [{"resolved": False}]
+
+    monkeypatch.setattr(eval_swe, "evaluate", fake_evaluate)
+
+    eval_swe.main()
+
+    assert called["model_path"] == "stub-model"
+    assert called["max_turns"] == 15
+    assert called["max_new_tokens"] == 1024

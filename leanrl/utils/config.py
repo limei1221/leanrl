@@ -53,6 +53,8 @@ class TrainingConfig:
     gradient_checkpointing: bool = True
     num_ppo_epochs: int = 1
     save_best_only: bool = False
+    max_seq_len: int = -1  # truncate sequences longer than this (-1 = no limit)
+    async_prefetch: bool = False
     seed: int = 42
 
 

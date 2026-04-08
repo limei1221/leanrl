@@ -46,26 +46,21 @@ class SingleTurnExecutor:
         self.ref_model = ref_model
         self.config = config
 
-    def execute(
+    def start_rollout(
         self,
         prompts: list[str],
         labels: list[str],
         tokenizer=None,
-    ) -> Experience:
-        """Run single-turn rollout + reward + advantage computation.
-
-        Args:
-            prompts: list of B prompt strings.
-            labels: list of B gold label strings.
-            tokenizer: tokenizer for formatting prompts (optional).
+    ) -> tuple:
+        """Start async vLLM generation and return a Ray future + metadata.
 
         Returns:
-            Experience batch ready for training.
+            (ray_future, expanded_labels, G) tuple. Pass these to
+            ``finish_experience`` to build the Experience batch.
         """
         G = self.config.grpo.n_samples_per_prompt
         cfg = self.config
 
-        # Format prompts with chat template if tokenizer provided
         formatted_prompts = []
         for p in prompts:
             if tokenizer and hasattr(tokenizer, "apply_chat_template"):
@@ -77,22 +72,43 @@ class SingleTurnExecutor:
             else:
                 formatted_prompts.append(p)
 
-        # 1. Rollout: generate G samples per prompt via vLLM
-        rollouts: list[RolloutResult] = ray.get(
-            self.rollout_engine.generate.remote(
-                formatted_prompts,
-                n_samples=G,
-                max_new_tokens=cfg.rollout.max_new_tokens,
-                temperature=cfg.rollout.temperature,
-            )
-        )
-        logger.info(f"Generated {len(rollouts)} rollouts for {len(prompts)} prompts (G={G})")
-
-        # 2. Reward: score each completion
-        # Expand labels to match B*G rollouts
         expanded_labels = []
         for label in labels:
             expanded_labels.extend([label] * G)
+
+        future = self.rollout_engine.generate.remote(
+            formatted_prompts,
+            n_samples=G,
+            max_new_tokens=cfg.rollout.max_new_tokens,
+            temperature=cfg.rollout.temperature,
+        )
+        return future, expanded_labels, G
+
+    def finish_experience(
+        self,
+        rollout_future,
+        expanded_labels: list[str],
+        G: int,
+        tokenizer=None,
+    ) -> Experience:
+        """Wait for rollouts and build an Experience batch.
+
+        Args:
+            rollout_future: Ray ObjectRef from ``start_rollout``.
+            expanded_labels: B*G labels (already expanded).
+            G: samples per prompt.
+            tokenizer: tokenizer for ref log-prob computation.
+
+        Returns:
+            Experience batch ready for training.
+        """
+        cfg = self.config
+
+        rollouts: list[RolloutResult] = ray.get(rollout_future)
+        logger.info(
+            f"Generated {len(rollouts)} rollouts for "
+            f"{len(rollouts) // G} prompts (G={G})"
+        )
 
         responses = [r.response_text for r in rollouts]
         rewards = self.reward_fn(responses, expanded_labels)
@@ -100,22 +116,32 @@ class SingleTurnExecutor:
         reward_nonzero = (rewards > 0).float().mean().item()
         logger.info(f"Rewards: mean={reward_mean:.3f}, pass_rate={reward_nonzero:.3f}")
 
-        # 3. GRPO advantages
         advantages = compute_grpo_advantages(rewards, G, eps=cfg.grpo.advantage_eps)
-
-        # 4. Reference log-probs (batched)
         ref_log_probs_list = self._compute_ref_logprobs(rollouts, tokenizer)
 
-        # 5. Build Experience
         experience = build_experience_from_rollouts(
             rollouts=rollouts,
             rewards=rewards,
             advantages=advantages,
             ref_log_probs_list=ref_log_probs_list,
             pad_token_id=tokenizer.pad_token_id if tokenizer else 0,
+            max_seq_len=cfg.training.max_seq_len,
         )
         experience.labels = expanded_labels
         return experience
+
+    def execute(
+        self,
+        prompts: list[str],
+        labels: list[str],
+        tokenizer=None,
+    ) -> Experience:
+        """Run single-turn rollout + reward + advantage computation.
+
+        Synchronous wrapper around ``start_rollout`` + ``finish_experience``.
+        """
+        future, expanded_labels, G = self.start_rollout(prompts, labels, tokenizer)
+        return self.finish_experience(future, expanded_labels, G, tokenizer)
 
     def _compute_ref_logprobs(self, rollouts: list[RolloutResult], tokenizer) -> list[Tensor]:
         """Compute reference model log-probs for each rollout, in mini-batches

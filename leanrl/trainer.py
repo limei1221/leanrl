@@ -151,6 +151,22 @@ class GRPOTrainer:
 
         logger.info(f"Executor: {cfg.task} mode")
 
+    def _use_async_prefetch(self) -> bool:
+        """Whether async rollout prefetching is enabled and applicable."""
+        cfg = self.config
+        if not cfg.training.async_prefetch:
+            return False
+        if cfg.task != "math":
+            logger.warning("async_prefetch only supports single-turn (math) tasks, disabling")
+            return False
+        if cfg.infra.vllm_enable_sleep:
+            logger.warning(
+                "async_prefetch requires vllm_enable_sleep=False "
+                "(vLLM must stay awake for prefetch), disabling"
+            )
+            return False
+        return True
+
     def train(self):
         """Main GRPO training loop."""
         cfg = self.config
@@ -163,6 +179,25 @@ class GRPOTrainer:
         logger.info(f"  Clip range: {cfg.grpo.clip_range}")
         logger.info(f"  LR: {cfg.training.lr}")
         logger.info("=" * 60)
+
+        # make output directory if it doesn't exist
+        output_dir = Path(self.config.logging.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        if self._use_async_prefetch():
+            logger.info("Async rollout prefetching enabled")
+            self._train_async()
+        else:
+            self._train_sync()
+
+        # Final save — always save regardless of save_best_only
+        self._save_checkpoint(final=True)
+        self.metrics.finish()
+        logger.info("Training complete!")
+
+    def _train_sync(self):
+        """Sequential training loop (original flow)."""
+        cfg = self.config
 
         for epoch in range(cfg.training.num_epochs):
             logger.info(f"Epoch {epoch + 1}/{cfg.training.num_epochs}")
@@ -193,7 +228,7 @@ class GRPOTrainer:
                 # Free GPU memory held by the frozen reference model
                 self.ref_model.offload_to_cpu()
 
-                step_metrics = self._train_on_experience(experience)
+                train_metrics = self._train_on_experience(experience)
 
                 # Bring reference model back for next rollout
                 self.ref_model.reload_to_gpu()
@@ -211,46 +246,121 @@ class GRPOTrainer:
                                 # so the trainer-side copy can be freed immediately
                 ray.get(future)
 
-                # --- Logging ---
-                step_time = time.time() - step_start
-                step_metrics["step_time"] = step_time
-                step_metrics["reward_mean"] = experience.rewards.mean().item()
-                step_metrics["reward_std"] = experience.rewards.std().item()
-                step_metrics["pass_rate"] = (experience.rewards > 0).float().mean().item()
-                step_metrics["epoch"] = epoch + 1
+                self._log_and_checkpoint(experience, train_metrics, step_start, epoch)
 
-                if self.global_step % cfg.training.logging_steps == 0:
-                    self.metrics.log(step_metrics, step=self.global_step)
+    def _train_async(self):
+        """Async prefetch loop: overlaps next rollout generation with training.
 
-                # --- Checkpointing ---
-                if cfg.training.save_steps > 0 and self.global_step > 0 and self.global_step % cfg.training.save_steps == 0:
-                    if cfg.training.save_best_only and self.eval_loader is not None:
-                        eval_metric = self._evaluate()
-                        eval_metrics = {
-                            "eval_accuracy" if cfg.task == "math" else "eval_resolve_rate": eval_metric,
-                        }
-                        self.metrics.log(eval_metrics, step=self.global_step)
-                        if eval_metric > self.best_eval_metric:
-                            logger.info(
-                                f"New best eval metric: {eval_metric:.4f} "
-                                f"(prev {self.best_eval_metric:.4f})"
-                            )
-                            self.best_eval_metric = eval_metric
-                            self._save_checkpoint()
-                        else:
-                            logger.info(
-                                f"Eval metric {eval_metric:.4f} did not improve "
-                                f"(best {self.best_eval_metric:.4f}), skipping checkpoint"
-                            )
-                    else:
-                        self._save_checkpoint()
+        Timeline per step:
+          [GPU 1] Generate N+1 (async)   [GPU 0] train on N
+          [GPU 0] ref_logprobs for N+1   [GPU 1] weight sync
+        """
+        cfg = self.config
 
-                self.global_step += 1
+        for epoch in range(cfg.training.num_epochs):
+            logger.info(f"Epoch {epoch + 1}/{cfg.training.num_epochs}")
 
-        # Final save — always save regardless of save_best_only
-        self._save_checkpoint(final=True)
-        self.metrics.finish()
-        logger.info("Training complete!")
+            batches = list(self.train_loader)
+            if not batches:
+                continue
+
+            # First batch: synchronous rollout (no overlap possible yet)
+            first_batch = batches[0]
+            experience = self.executor.execute(
+                prompts=first_batch["prompts"],
+                labels=first_batch["labels"],
+                tokenizer=self.tokenizer,
+            )
+
+            for batch_idx in range(len(batches)):
+                if cfg.training.max_steps > 0 and self.global_step >= cfg.training.max_steps:
+                    break
+
+                step_start = time.time()
+                has_next = batch_idx + 1 < len(batches)
+
+                # Start next batch's rollout generation on GPU 1 (async)
+                prefetch_future = None
+                prefetch_labels = None
+                prefetch_G = None
+                if has_next:
+                    next_batch = batches[batch_idx + 1]
+                    prefetch_future, prefetch_labels, prefetch_G = (
+                        self.executor.start_rollout(
+                            prompts=next_batch["prompts"],
+                            labels=next_batch["labels"],
+                            tokenizer=self.tokenizer,
+                        )
+                    )
+
+                # Train on current experience (GPU 0)
+                self.ref_model.offload_to_cpu()
+                train_metrics = self._train_on_experience(experience)
+                self.ref_model.reload_to_gpu()
+
+                # Sync updated weights to vLLM
+                state_dict = self.policy.get_state_dict_for_vllm()
+                future = self.rollout_engine.update_weights.remote(state_dict)
+                del state_dict
+                ray.get(future)
+
+                self._log_and_checkpoint(experience, train_metrics, step_start, epoch)
+
+                # Build experience from prefetched rollouts (ref_logprobs on GPU 0)
+                if prefetch_future is not None:
+                    experience = self.executor.finish_experience(
+                        prefetch_future, prefetch_labels, prefetch_G, self.tokenizer
+                    )
+
+    def _log_and_checkpoint(
+        self, experience: Experience, train_metrics: dict, step_start: float, epoch: int,
+    ):
+        """Shared logging and checkpointing logic for both sync and async loops."""
+        cfg = self.config
+        success_mask = self._success_mask(experience.rewards)
+
+        step_time = time.time() - step_start
+        step_metrics = dict(train_metrics)
+        step_metrics["step_time"] = step_time
+        step_metrics["reward_mean"] = experience.rewards.mean().item()
+        step_metrics["reward_std"] = experience.rewards.std().item()
+        step_metrics["pass_rate"] = success_mask.float().mean().item()
+        step_metrics["epoch"] = epoch + 1
+
+        if self.global_step % cfg.training.logging_steps == 0:
+            self.metrics.log(step_metrics, step=self.global_step)
+
+        if cfg.training.save_steps > 0 and self.global_step > 0 and self.global_step % cfg.training.save_steps == 0:
+            if cfg.training.save_best_only and self.eval_loader is not None:
+                eval_metric = self._evaluate()
+                eval_metrics = {
+                    "eval_accuracy" if cfg.task == "math" else "eval_resolve_rate": eval_metric,
+                }
+                self.metrics.log(eval_metrics, step=self.global_step)
+                if eval_metric > self.best_eval_metric:
+                    logger.info(
+                        f"New best eval metric: {eval_metric:.4f} "
+                        f"(prev {self.best_eval_metric:.4f})"
+                    )
+                    self.best_eval_metric = eval_metric
+                    self._save_checkpoint()
+                else:
+                    logger.info(
+                        f"Eval metric {eval_metric:.4f} did not improve "
+                        f"(best {self.best_eval_metric:.4f}), skipping checkpoint"
+                    )
+            else:
+                self._save_checkpoint()
+
+        self.global_step += 1
+
+    def _success_mask(self, rewards: torch.Tensor) -> torch.Tensor:
+        """Return a boolean mask for successful samples under the active task."""
+        if self.config.task == "swe":
+            # SWE test reward is up to 1.0, shaping adds up to 0.3.
+            # A resolved instance has test_reward == 1.0, so total > 1.0.
+            return rewards > 1.0
+        return rewards > 0
 
     def _train_on_experience(self, experience: Experience) -> dict:
         """Run multiple PPO epochs over the experience batch."""
@@ -327,9 +437,9 @@ class GRPOTrainer:
             )
 
             # Each prompt generates G samples; rewards are per-sample.
-            # To be consistent with eval scripts (greedy, 1 sample),
-            # we count per-sample correctness averaged over all samples.
-            total_correct += (experience.rewards > 0).float().sum().item()
+            # For SWE, only a full reward counts as resolved even if the
+            # training reward uses partial credit.
+            total_correct += self._success_mask(experience.rewards).float().sum().item()
             total_samples += len(experience.rewards)
 
         metric = total_correct / total_samples if total_samples > 0 else 0.0

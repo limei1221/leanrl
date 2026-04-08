@@ -57,6 +57,8 @@ def main():
     parser.add_argument("--dataset", default="princeton-nlp/SWE-bench_Lite")
     parser.add_argument("--split", default="test")
     parser.add_argument("--num_samples", type=int, default=None)
+    parser.add_argument("--random_seed", type=int, default=42,
+                        help="Random seed for sampling instances (default: None = no shuffle)")
     parser.add_argument("--max_workers", type=int, default=8)
     parser.add_argument("--test_timeout", type=int, default=300)
     parser.add_argument("--memory_limit", type=str, default="4g")
@@ -67,7 +69,12 @@ def main():
     print(f"Loading {args.dataset} ({args.split}) ...")
     dataset = load_dataset(args.dataset, split=args.split)
     if args.num_samples is not None:
-        dataset = dataset.select(range(min(args.num_samples, len(dataset))))
+        if args.random_seed is not None:
+            dataset = dataset.shuffle(seed=args.random_seed).select(
+                range(min(args.num_samples, len(dataset)))
+            )
+        else:
+            dataset = dataset.select(range(min(args.num_samples, len(dataset))))
 
     items = [build_task(row) for row in dataset]
     print(f"Running oracle on {len(items)} instances with {args.max_workers} workers ...")

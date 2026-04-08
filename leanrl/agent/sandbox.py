@@ -312,16 +312,16 @@ class SandboxPool:
             if task.instance_id in self._active:
                 return self._active[task.instance_id]
 
-        sandbox = DockerSandbox(
-            task=task,
-            image_prefix=self.image_prefix,
-            timeout=self.timeout,
-            memory_limit=self.memory_limit,
-            cpu_limit=self.cpu_limit,
-        )
-        sandbox.start()
-        with self._lock:
+            sandbox = DockerSandbox(
+                task=task,
+                image_prefix=self.image_prefix,
+                timeout=self.timeout,
+                memory_limit=self.memory_limit,
+                cpu_limit=self.cpu_limit,
+            )
             self._active[task.instance_id] = sandbox
+
+        sandbox.start()
         return sandbox
 
     def release_sandbox(self, instance_id: str):

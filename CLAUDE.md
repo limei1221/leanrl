@@ -17,6 +17,8 @@ Key technologies: Ray (distributed rollouts), vLLM (fast inference), DeepSpeed (
 pip install -e ".[dev]"
 # DeepSpeed MPI requirement:
 apt-get install -y libopenmpi-dev openmpi-bin
+# If CUDA tooling is missing:
+apt-get install -y nvidia-cuda-toolkit
 ```
 
 ### Lint & Format
@@ -95,6 +97,10 @@ The main loop alternates between three phases per batch:
 
 Weight sync uses `torch.save`-serialized bytes over `collective_rpc` to survive msgpack serialization limits.
 
+### Async Rollout Prefetching
+
+When `training.async_prefetch: true` and `infra.vllm_enable_sleep: false` (dedicated GPUs), the trainer overlaps the next batch's vLLM generation on GPU 1 with training on GPU 0. Prefetched rollouts use weights one step stale, handled by importance sampling. Only available for single-turn (math) tasks.
+
 ### SWE-bench Agent Actions
 
 `parse_action()` in `multi_turn.py` accepts two formats:
@@ -114,4 +120,4 @@ All training hyperparameters are in YAML configs under `configs/`. Key sections:
 - `infra`: `deepspeed_stage` (2 or 3), `offload_optimizer`, `vllm_enable_sleep`
 - `swe` (SWE-bench only): `max_turns`, `sandbox_timeout`, `max_concurrent_sandboxes`
 
-Baseline GSM8K accuracy for Qwen2.5-1.5B-Instruct: 66.9%, best after training (step 100): 69.7%.
+Baseline GSM8K accuracy for Qwen2.5-1.5B-Instruct: 61.5%, best after training (step 100): 69.7%.
