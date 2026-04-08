@@ -52,6 +52,7 @@ class TrainingConfig:
     logging_steps: int = 1
     gradient_checkpointing: bool = True
     num_ppo_epochs: int = 1
+    save_best_only: bool = False
     seed: int = 42
 
 
@@ -94,7 +95,8 @@ class DataConfig:
     label_key: str = "answer"
     max_samples: int = -1
     eval_dataset: Optional[str] = None
-    eval_split: str = "test"
+    eval_split: str = "eval"
+    max_samples_to_eval: int = 128
 
 
 @dataclass

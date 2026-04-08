@@ -7,7 +7,7 @@ model:
 
 grpo:
   n_samples_per_prompt: 8
-  kl_coef: 0.04
+  kl_coef: 0.02
   clip_range: 0.2
   max_grad_norm: 1.0
 
@@ -18,7 +18,7 @@ rollout:
   top_p: 0.95
 
 training:
-  lr: 5.0e-7
+  lr: 1.0e-6
   weight_decay: 0.01
   warmup_ratio: 0.03
   train_batch_size: 32
@@ -28,6 +28,7 @@ training:
   logging_steps: 1
   gradient_checkpointing: false
   num_ppo_epochs: 1
+  save_best_only: true
   seed: 42
 
 data:
@@ -36,6 +37,7 @@ data:
   input_key: question
   label_key: answer
   max_samples: -1
+  max_samples_to_eval: 32
 
 infra:
   vllm_num_engines: 1
@@ -50,4 +52,4 @@ infra:
 logging:
   use_wandb: true
   wandb_project: leanrl-math
-  output_dir: ./output/math_grpo_1.5b
+  output_dir: ./output/math_grpo_1.5b_lr1e-6_kl0.02

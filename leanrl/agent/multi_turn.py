@@ -94,6 +94,14 @@ Important rules:
 - Emit <done/> when finished."""
 
 
+def build_initial_prompt(problem_statement: str) -> list[dict[str, str]]:
+    """Build the initial chat messages for a SWE-bench task."""
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": f"## Issue\n{problem_statement}"},
+    ]
+
+
 class MultiTurnExecutor:
     """Executes multi-turn agent interactions for SWE-bench tasks.
 
@@ -252,8 +260,7 @@ class MultiTurnExecutor:
         with a response_mask that marks only model-generated tokens.
         """
         # Build initial prompt
-        initial_prompt = f"{SYSTEM_PROMPT}\n\n## Issue\n{task.problem_statement}"
-        messages = [{"role": "user", "content": initial_prompt}]
+        messages = build_initial_prompt(task.problem_statement)
 
         import ray
 
@@ -341,7 +348,7 @@ class MultiTurnExecutor:
             full_ids=full_ids,
             old_log_probs=old_log_probs,
             response_text=conversation,
-            prompt_text=initial_prompt,
+            prompt_text=task.problem_statement,
             prompt_len=len(prompt_ids_tensor),
             response_len=len(response_ids),
             response_mask=response_mask,

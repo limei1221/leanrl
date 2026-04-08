@@ -27,7 +27,7 @@ from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
-from leanrl.agent.multi_turn import SYSTEM_PROMPT, parse_action, format_observation, ACTION_DONE, ACTION_BASH
+from leanrl.agent.multi_turn import build_initial_prompt, parse_action, format_observation, ACTION_DONE
 from leanrl.agent.sandbox import DockerSandbox, TaskInstance
 from leanrl.reward.swe_reward import compute_swe_reward
 
@@ -73,10 +73,7 @@ def run_trajectory(
         reward: 1.0 if all tests pass, 0.0 otherwise.
         info: dict with per-task test results.
     """
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"## Issue\n{task.problem_statement}"},
-    ]
+    messages = build_initial_prompt(task.problem_statement)
 
     with DockerSandbox(
         task=task,
@@ -270,8 +267,8 @@ def main() -> None:
     # switch to princeton-nlp/SWE-bench_Verified if possible
     parser.add_argument("--dataset", default="princeton-nlp/SWE-bench_Lite",
                         help="SWE-bench dataset name (default: princeton-nlp/SWE-bench_Lite)")
-    parser.add_argument("--split", default="test",
-                        help="Dataset split to evaluate on (default: test)")
+    parser.add_argument("--split", default="dev",
+                        help="Dataset split to evaluate on (default: dev)")
     parser.add_argument("--num_samples", type=int, default=None,
                         help="Number of instances to evaluate (default: all)")
     parser.add_argument("--max_turns", type=int, default=15,

@@ -35,6 +35,7 @@ class GRPOTrainer:
             run_name=config.logging.wandb_run_name,
         )
         self.global_step = 0
+        self.best_eval_metric = -1.0
 
     def _setup_infrastructure(self):
         """Initialize Ray cluster."""
@@ -110,15 +111,18 @@ class GRPOTrainer:
         return total_rollout_steps * max(1, optimizer_steps_per_rollout)
 
     def _setup_data(self):
-        """Build prompt dataloader."""
-        from leanrl.data.dataset import build_prompt_dataloader
+        """Build prompt dataloaders (train + optional eval)."""
+        from leanrl.data.dataset import build_train_and_eval_dataloaders
 
-        self.train_loader = build_prompt_dataloader(
+        self.train_loader, self.eval_loader = build_train_and_eval_dataloaders(
             config=self.config.data,
             batch_size=self.config.rollout.rollout_batch_size,
             tokenizer=self.tokenizer,
+            seed=self.config.training.seed,
         )
-        logger.info(f"Dataloader: {len(self.train_loader)} batches")
+        logger.info(f"Train dataloader: {len(self.train_loader)} batches")
+        if self.eval_loader is not None:
+            logger.info(f"Eval dataloader: {len(self.eval_loader)} batches")
 
     def _setup_executor(self):
         """Build the appropriate agent executor based on task type."""
@@ -180,10 +184,11 @@ class GRPOTrainer:
                 )
 
                 # --- Training phase (vLLM sleeping, training GPU active) ---
-                try:
-                    ray.get(self.rollout_engine.sleep.remote())
-                except Exception:
-                    pass
+                if self.config.infra.vllm_enable_sleep:
+                    try:
+                        ray.get(self.rollout_engine.sleep.remote())
+                    except Exception:
+                        pass
 
                 # Free GPU memory held by the frozen reference model
                 self.ref_model.offload_to_cpu()
@@ -194,10 +199,11 @@ class GRPOTrainer:
                 self.ref_model.reload_to_gpu()
 
                 # --- Sync weights back to vLLM ---
-                try:
-                    ray.get(self.rollout_engine.wake_up.remote())
-                except Exception:
-                    pass
+                if self.config.infra.vllm_enable_sleep:
+                    try:
+                        ray.get(self.rollout_engine.wake_up.remote())
+                    except Exception:
+                        pass
 
                 state_dict = self.policy.get_state_dict_for_vllm()
                 future = self.rollout_engine.update_weights.remote(state_dict)
@@ -218,11 +224,30 @@ class GRPOTrainer:
 
                 # --- Checkpointing ---
                 if cfg.training.save_steps > 0 and self.global_step > 0 and self.global_step % cfg.training.save_steps == 0:
-                    self._save_checkpoint()
+                    if cfg.training.save_best_only and self.eval_loader is not None:
+                        eval_metric = self._evaluate()
+                        eval_metrics = {
+                            "eval_accuracy" if cfg.task == "math" else "eval_resolve_rate": eval_metric,
+                        }
+                        self.metrics.log(eval_metrics, step=self.global_step)
+                        if eval_metric > self.best_eval_metric:
+                            logger.info(
+                                f"New best eval metric: {eval_metric:.4f} "
+                                f"(prev {self.best_eval_metric:.4f})"
+                            )
+                            self.best_eval_metric = eval_metric
+                            self._save_checkpoint()
+                        else:
+                            logger.info(
+                                f"Eval metric {eval_metric:.4f} did not improve "
+                                f"(best {self.best_eval_metric:.4f}), skipping checkpoint"
+                            )
+                    else:
+                        self._save_checkpoint()
 
                 self.global_step += 1
 
-        # Final save
+        # Final save — always save regardless of save_best_only
         self._save_checkpoint(final=True)
         self.metrics.finish()
         logger.info("Training complete!")
@@ -284,6 +309,33 @@ class GRPOTrainer:
         if num_updates > 0:
             all_metrics = {k: v / num_updates for k, v in all_metrics.items()}
         return all_metrics
+
+    def _evaluate(self) -> float:
+        """Run eval and return the metric (accuracy for math, resolve_rate for swe)."""
+        logger.info("Running evaluation...")
+        total_correct = 0
+        total_samples = 0
+
+        for batch in self.eval_loader:
+            prompts = batch["prompts"]
+            labels = batch["labels"]
+
+            experience = self.executor.execute(
+                prompts=prompts,
+                labels=labels,
+                tokenizer=self.tokenizer,
+            )
+
+            # Each prompt generates G samples; rewards are per-sample.
+            # To be consistent with eval scripts (greedy, 1 sample),
+            # we count per-sample correctness averaged over all samples.
+            total_correct += (experience.rewards > 0).float().sum().item()
+            total_samples += len(experience.rewards)
+
+        metric = total_correct / total_samples if total_samples > 0 else 0.0
+        metric_name = "accuracy" if self.config.task == "math" else "resolve_rate"
+        logger.info(f"Eval {metric_name}: {metric:.4f} ({int(total_correct)}/{total_samples})")
+        return metric
 
     def _save_checkpoint(self, final: bool = False):
         output_dir = Path(self.config.logging.output_dir)

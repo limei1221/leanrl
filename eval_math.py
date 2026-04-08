@@ -14,21 +14,13 @@ from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
+from leanrl.agent.single_turn import build_math_messages
 from leanrl.reward.math_reward import extract_gsm8k_answer, numbers_equal
-
-SYSTEM_PROMPT = (
-    "You are a helpful math assistant. Solve the problem step by step, "
-    "then give your final numeric answer after ####."
-)
 
 
 def build_prompt(tokenizer: AutoTokenizer, question: str) -> str:
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": question},
-    ]
     return tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
+        build_math_messages(question), tokenize=False, add_generation_prompt=True
     )
 
 

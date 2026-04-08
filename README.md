@@ -84,20 +84,16 @@ Hardware: 2× RTX 4090 (24 GB each), 197 GB RAM, 15 CPU cores, 485 GB disk. Pyth
 
 ### Math
 
-| Checkpoint | Model | Accuracy |
+|  | Model | Accuracy |
 |------------|-------|----------|
-| baseline | Qwen/Qwen2.5-1.5B-Instruct | 66.9% (882/1319) |
-| step 50 | output/math_grpo_1.5b/step_50 | 67.9% (896/1319) |
-| step 100 | output/math_grpo_1.5b/step_100 | 69.7% (918/1319) |
-| step 150 | output/math_grpo_1.5b/step_150 | 68.5% (903/1319) |
-| step 200 | output/math_grpo_1.5b/step_200 | 68.5% (904/1319) |
-| final | output/math_grpo_1.5b/final | 68.6% (905/1319) |
-| ref1 | Qwen/Qwen2.5-Math-1.5B-Instruct | 83.0% (1095/1319) |
-| ref2 | Qwen/Qwen2.5-Math-7B-Instruct | 93.9% (1239/1319) |
+| baseline | Qwen/Qwen2.5-1.5B-Instruct | 61.5%  (811/1319) |
+| exp | output/math_grpo_1.5b/step_100 | 69.7% (918/1319) |
+| ref1 | Qwen/Qwen2.5-Math-1.5B-Instruct | 84.6%  (1116/1319) |
+| ref2 | Qwen/Qwen2.5-Math-7B-Instruct | 94.1%  (1241/1319) |
 
 ### Coding
 
-| Checkpoint | Model | Resolve Rate |
+|  | Model | Resolve Rate |
 |------------|-------|--------------|
 | baseline | Qwen/Qwen2.5-1.5B-Instruct | |
 | ref1 | Qwen/Qwen2.5-Coder-1.5B-Instruct | |

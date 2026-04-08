@@ -14,6 +14,19 @@ from leanrl.utils.config import TrainConfig
 from leanrl.utils.logging import logger
 
 
+MATH_SYSTEM_PROMPT = (
+    "Please reason step by step, and give your final numeric answer after ####."
+)
+
+
+def build_math_messages(question: str) -> list[dict[str, str]]:
+    """Build the shared chat messages for GSM8K-style math tasks."""
+    return [
+        {"role": "system", "content": MATH_SYSTEM_PROMPT},
+        {"role": "user", "content": question},
+    ]
+
+
 class SingleTurnExecutor:
     """Generates G completions per prompt, scores them, and builds Experience.
 
@@ -56,7 +69,7 @@ class SingleTurnExecutor:
         formatted_prompts = []
         for p in prompts:
             if tokenizer and hasattr(tokenizer, "apply_chat_template"):
-                messages = [{"role": "user", "content": p}]
+                messages = build_math_messages(p)
                 formatted = tokenizer.apply_chat_template(
                     messages, tokenize=False, add_generation_prompt=True
                 )

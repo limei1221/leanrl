@@ -43,6 +43,7 @@ data:  # switch to princeton-nlp/SWE-bench/train or SWE-Gym/SWE-Gym/train if pos
   prompt_dataset_split: test
   input_key: problem_statement
   label_key: instance_id
+  max_samples: -1
 
 infra:
   vllm_num_engines: 1
