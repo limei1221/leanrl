@@ -68,7 +68,7 @@ def extract_old_log_probs(
     return log_probs_list
 
 
-@ray.remote
+@ray.remote(num_gpus=1)
 class RolloutEngine:
     """Ray actor that wraps a vLLM engine for high-throughput generation.
 
