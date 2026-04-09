@@ -271,14 +271,14 @@ def main() -> None:
                         help="SWE-bench dataset name (default: princeton-nlp/SWE-bench_Lite)")
     parser.add_argument("--split", default="test",
                         help="Dataset split to evaluate on (default: test)")
-    parser.add_argument("--num_samples", type=int, default=15,
-                        help="Number of instances to evaluate (default: 15)")
+    parser.add_argument("--num_samples", type=int, default=16,
+                        help="Number of instances to evaluate (default: 16)")
     parser.add_argument("--random_seed", type=int, default=42,
                         help="Random seed for sampling instances (default: None = no shuffle)")
-    parser.add_argument("--max_turns", type=int, default=20,
-                        help="Max agent turns per instance (default: 20)")
-    parser.add_argument("--max_new_tokens", type=int, default=2048,
-                        help="Max tokens to generate per turn (default: 2048)")
+    parser.add_argument("--max_turns", type=int, default=15,
+                        help="Max agent turns per instance (default: 15)")
+    parser.add_argument("--max_new_tokens", type=int, default=1024,
+                        help="Max tokens to generate per turn (default: 1024)")
     parser.add_argument("--max_workers", type=int, default=8,
                         help="Parallel sandbox workers (default: 8)")
     parser.add_argument("--sandbox_timeout", type=int, default=120,

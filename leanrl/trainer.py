@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from pathlib import Path
 
@@ -70,7 +71,7 @@ class GRPOTrainer:
         )
         self.tokenizer = self.policy.tokenizer
         logger.info("Policy model loaded")
-        logger.info("Estimated total steps: %d", total_steps)
+        logger.info(f"Estimated total steps: {total_steps}")
 
         # Reference model (frozen, shares GPU with policy)
         device = torch.device("cuda")
@@ -99,9 +100,9 @@ class GRPOTrainer:
         rollout_steps_per_epoch = max(1, n_samples // batch_size)
         total_rollout_steps = rollout_steps_per_epoch * cfg.training.num_epochs
 
-        # Each rollout step runs num_ppo_epochs over the experience batch.
-        # DeepSpeed counts an optimizer step every gradient_accumulation_steps
-        # micro-batches, so we need to convert rollout steps to optimizer steps.
+        # One rollout step runs `num_ppo_epochs` over the sampled batch.
+        # DeepSpeed increments optimizer steps once every
+        # `gradient_accumulation_steps` micro-batches, so convert accordingly.
         samples_per_rollout = batch_size * cfg.grpo.n_samples_per_prompt
         microbatches_per_epoch = max(1, samples_per_rollout // cfg.training.micro_batch_size)
         grad_accum = max(1, cfg.training.train_batch_size // cfg.training.micro_batch_size)
@@ -180,9 +181,12 @@ class GRPOTrainer:
         logger.info(f"  LR: {cfg.training.lr}")
         logger.info("=" * 60)
 
-        # make output directory if it doesn't exist
+        # Ensure output directory exists and refresh its mtime.
         output_dir = Path(self.config.logging.output_dir)
+        if output_dir.exists():
+            logger.warning(f"Output directory already exists: {output_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
+        os.utime(output_dir, None)
 
         if self._use_async_prefetch():
             logger.info("Async rollout prefetching enabled")
@@ -252,7 +256,7 @@ class GRPOTrainer:
         """Async prefetch loop: overlaps next rollout generation with training.
 
         Timeline per step:
-          [GPU 1] Generate N+1 (async)   [GPU 0] train on N
+          [GPU 0] train on N             [GPU 1] Generate N+1 (async)
           [GPU 0] ref_logprobs for N+1   [GPU 1] weight sync
         """
         cfg = self.config
@@ -332,9 +336,9 @@ class GRPOTrainer:
 
         if cfg.training.save_steps > 0 and self.global_step > 0 and self.global_step % cfg.training.save_steps == 0:
             if cfg.training.save_best_only and self.eval_loader is not None:
-                eval_metric = self._evaluate()
+                eval_metric, metric_name = self._evaluate()
                 eval_metrics = {
-                    "eval_accuracy" if cfg.task == "math" else "eval_resolve_rate": eval_metric,
+                    f"eval_{metric_name}": eval_metric,
                 }
                 self.metrics.log(eval_metrics, step=self.global_step)
                 if eval_metric > self.best_eval_metric:
@@ -445,7 +449,7 @@ class GRPOTrainer:
         metric = total_correct / total_samples if total_samples > 0 else 0.0
         metric_name = "accuracy" if self.config.task == "math" else "resolve_rate"
         logger.info(f"Eval {metric_name}: {metric:.4f} ({int(total_correct)}/{total_samples})")
-        return metric
+        return metric, metric_name
 
     def _save_checkpoint(self, final: bool = False):
         output_dir = Path(self.config.logging.output_dir)

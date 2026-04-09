@@ -7,7 +7,7 @@ model:
 
 grpo:
   n_samples_per_prompt: 8
-  kl_coef: 0.02
+  kl_coef: 0.04
   clip_range: 0.2
   max_grad_norm: 1.0
 
@@ -18,7 +18,7 @@ rollout:
   top_p: 0.95
 
 training:
-  lr: 1.0e-6
+  lr: 5.0e-6
   weight_decay: 0.01
   warmup_ratio: 0.03
   train_batch_size: 32

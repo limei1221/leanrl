@@ -7,7 +7,7 @@ model:
 
 grpo:
   n_samples_per_prompt: 4
-  kl_coef: 0.02
+  kl_coef: 0.05
   clip_range: 0.2
   max_grad_norm: 1.0
 
@@ -24,10 +24,10 @@ training:
   train_batch_size: 8
   micro_batch_size: 1
   num_epochs: 1
-  save_steps: 50
+  save_steps: 20
   logging_steps: 1
   gradient_checkpointing: true
-  max_seq_len: 4096
+  max_seq_len: 3072
   num_ppo_epochs: 1
   save_best_only: false
   seed: 42

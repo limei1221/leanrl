@@ -32,7 +32,7 @@ Training requires a 2-GPU setup: GPU 0 for the policy and reference models (Deep
 # Math (GSM8K/train)
 bash scripts/train_math.sh
 
-# SWE-bench (SWE-bench_Lite/test, switch to princeton-nlp/SWE-bench/train or SWE-Gym/SWE-Gym/train if possible)
+# SWE-bench (SWE-bench_Lite/test 284 samples, switch to princeton-nlp/SWE-bench/train or SWE-Gym/SWE-Gym/train if possible)
 bash scripts/setup_swe_docker.sh
 bash scripts/train_swe.sh
 ```
@@ -82,11 +82,12 @@ All hyperparameters live in YAML files under `configs/`. See `leanrl/utils/confi
 
 ```bash
 # Math (GSM8K/test)
-python eval_math.py --model_name_or_path <checkpoint>/final --batch_size 128
+python eval_math.py --model_name_or_path <checkpoint>/final
 
-# SWE-bench (SWE-bench_Lite/test, switch to princeton-nlp/SWE-bench_Verified if possible)
+# SWE-bench (SWE-bench_Lite/test 16 samples, switch to princeton-nlp/SWE-bench_Verified if possible)
 python eval_swe.py --model_name_or_path <checkpoint>/final
-python eval_swe_oracle.py  # golden-patch baseline (resolve rate: 0.8567 257/300)
+python eval_swe_oracle.py  # golden-patch baseline (resolve rate: 86.0% 258/300)
+python eval_swe_oracle.py --num_samples 16  # golden-patch baseline on 16 test samples (resolve rate: 93.8% 15/16)
 ```
 
 ## Experiments
@@ -103,15 +104,27 @@ Hardware: 2× RTX 4090 (24 GB each), 197 GB RAM, 15 CPU cores, 485 GB disk. Pyth
 | ref2 | Qwen/Qwen2.5-Math-7B-Instruct | 94.1%  (1241/1319) |
 
 ### Coding
-max_turns=15, max_new_tokens=2048
+max_turns=10, max_new_tokens=512
 
 |  | Model | Resolve Rate |
 |------------|-------|--------------|
-| baseline | Qwen/Qwen2.5-Coder-1.5B-Instruct |  |
-| ref2 | Qwen/Qwen2.5-Coder-3B-Instruct | |
-| ref3 | Qwen/Qwen2.5-Coder-7B-Instruct | |
-| ref4 | ricdomolm/mini-coder-1.7b | 6.7%  (1/15) |
-| ref5 | ricdomolm/mini-coder-4b |  |
+| baseline | ricdomolm/mini-coder-1.7b | 0.0%  (0/16) |
+| exp |  |  |
+| ref | ricdomolm/mini-coder-4b | 0.0%  (0/16) |
+
+max_turns=15, max_new_tokens=1024
+
+|  | Model | Resolve Rate |
+|------------|-------|--------------|
+| baseline | ricdomolm/mini-coder-1.7b | 6.2%  (1/16) |
+| ref | ricdomolm/mini-coder-4b | 0.0%  (0/16) |
+
+max_turns=20, max_new_tokens=2048
+
+|  | Model | Resolve Rate |
+|------------|-------|--------------|
+| baseline | ricdomolm/mini-coder-1.7b | 12.5%  (2/16) |
+| ref | ricdomolm/mini-coder-4b | 6.2%  (1/16) |
 
 ## License
 
