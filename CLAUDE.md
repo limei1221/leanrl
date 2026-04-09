@@ -81,7 +81,7 @@ The main loop alternates between three phases per batch:
 | `leanrl/grpo.py` | GRPO loss: `compute_grpo_advantages`, `compute_kl_penalty` (k3 estimator), `grpo_loss` |
 | `leanrl/models.py` | `PolicyModel` (DeepSpeed ZeRO-2/3), `ReferenceModel` (frozen, CPU-offloadable), weight sync logic |
 | `leanrl/rollout.py` | `RolloutEngine` Ray actor wrapping vLLM; `WeightUpdateExtension` for in-place weight sync |
-| `leanrl/experience.py` | `Experience` dataclass (batched rollouts), `build_experience_from_rollouts`, `ExperienceBuffer` |
+| `leanrl/experience.py` | `Experience` dataclass (batched rollouts), `build_experience_from_rollouts` |
 | `leanrl/agent/single_turn.py` | Math executor: formats prompts, generates completions, computes reference log-probs |
 | `leanrl/agent/multi_turn.py` | SWE-bench executor: multi-turn agent loop with `parse_action` (XML tags or markdown fences) |
 | `leanrl/agent/sandbox.py` | `DockerSandbox` (single container), `SandboxPool` (concurrent), SWE-bench task management |
