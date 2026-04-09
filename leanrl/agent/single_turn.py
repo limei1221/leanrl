@@ -117,6 +117,12 @@ class SingleTurnExecutor:
         logger.info(f"Rewards: mean={reward_mean:.3f}, pass_rate={reward_nonzero:.3f}")
 
         advantages = compute_grpo_advantages(rewards, G, eps=cfg.grpo.advantage_eps)
+
+        max_seq_len = cfg.training.max_seq_len
+        if max_seq_len > 0:
+            from leanrl.experience import truncate_rollout
+            rollouts = [truncate_rollout(r, max_seq_len) for r in rollouts]
+
         ref_log_probs_list = self._compute_ref_logprobs(rollouts, tokenizer)
 
         experience = build_experience_from_rollouts(

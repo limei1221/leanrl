@@ -84,13 +84,13 @@ def pad_sequences(sequences: list[Tensor], pad_value: int = 0, pad_side: str = "
     return padded
 
 
-def _truncate_rollout(r: RolloutResult, ref_lp: Tensor, max_seq_len: int):
+def truncate_rollout(r: RolloutResult, max_seq_len: int) -> RolloutResult:
     """Truncate a rollout's response to fit within max_seq_len (prompt + response)."""
     max_resp = max_seq_len - r.prompt_len
     if max_resp <= 0:
         max_resp = 1  # keep at least 1 response token
     if r.response_len <= max_resp:
-        return r, ref_lp
+        return r
     return RolloutResult(
         prompt_ids=r.prompt_ids,
         response_ids=r.response_ids[:max_resp],
@@ -101,7 +101,7 @@ def _truncate_rollout(r: RolloutResult, ref_lp: Tensor, max_seq_len: int):
         prompt_len=r.prompt_len,
         response_len=max_resp,
         response_mask=r.response_mask[:max_resp] if r.response_mask is not None else None,
-    ), ref_lp[:max_resp]
+    )
 
 
 def build_experience_from_rollouts(
@@ -126,12 +126,10 @@ def build_experience_from_rollouts(
         Batched Experience ready for training.
     """
     if max_seq_len > 0:
-        truncated = [
-            _truncate_rollout(r, lp, max_seq_len)
-            for r, lp in zip(rollouts, ref_log_probs_list)
+        rollouts = [truncate_rollout(r, max_seq_len) for r in rollouts]
+        ref_log_probs_list = [
+            lp[:r.response_len] for r, lp in zip(rollouts, ref_log_probs_list)
         ]
-        rollouts = [t[0] for t in truncated]
-        ref_log_probs_list = [t[1] for t in truncated]
 
     prompt_ids = pad_sequences([r.prompt_ids for r in rollouts], pad_value=pad_token_id)
     response_ids = pad_sequences([r.response_ids for r in rollouts], pad_value=pad_token_id)

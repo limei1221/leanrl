@@ -170,6 +170,12 @@ class MultiTurnExecutor:
         rewards = torch.tensor(all_rewards, dtype=torch.float32)
         advantages = compute_grpo_advantages(rewards, G, eps=cfg.grpo.advantage_eps)
 
+        # Truncate before ref log-probs to avoid OOM on long multi-turn sequences
+        max_seq_len = cfg.training.max_seq_len
+        if max_seq_len > 0:
+            from leanrl.experience import truncate_rollout
+            all_rollouts = [truncate_rollout(r, max_seq_len) for r in all_rollouts]
+
         ref_log_probs_list = self._compute_ref_logprobs(all_rollouts, tokenizer)
 
         experience = self._build_experience(
