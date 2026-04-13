@@ -56,9 +56,9 @@ bash scripts/train_swe.sh
 
 ### Evaluate
 ```bash
-python eval_math.py --model_name_or_path <checkpoint>/final --batch_size 128
-python eval_swe.py --model_name_or_path <checkpoint>/final --num_gpus 1
-python eval_swe_oracle.py  # golden patch baseline (resolve_rate: 0.86)
+python scripts/eval_math.py --model_name_or_path <checkpoint>/final --batch_size 128
+python scripts/eval_swe.py --model_name_or_path <checkpoint>/final --num_gpus 1
+python scripts/eval_swe_oracle.py  # golden patch baseline (resolve_rate: 0.86)
 ```
 
 ## Architecture
@@ -116,8 +116,8 @@ All training hyperparameters are in YAML configs under `configs/`. Key sections:
 - `model`: `model_name_or_path`, optional `ref_model_name_or_path` (defaults to same model)
 - `grpo`: `n_samples_per_prompt` (G), `kl_coef`, `clip_range`, `entropy_coef`
 - `rollout`: `rollout_batch_size`, `max_new_tokens`, `temperature`
-- `training`: `lr`, `micro_batch_size`, `train_batch_size`, `num_ppo_epochs`, `max_steps` (-1 = full dataset)
+- `training`: `lr`, `micro_batch_size`, `train_batch_size`, `num_ppo_epochs`, `max_steps` (-1 = full dataset), `max_seq_len` (-1 = no truncation)
 - `infra`: `deepspeed_stage` (2 or 3), `offload_optimizer`, `vllm_enable_sleep`
 - `swe` (SWE-bench only): `max_turns`, `sandbox_timeout`, `max_concurrent_sandboxes`
 
-Baseline GSM8K accuracy for Qwen2.5-1.5B-Instruct: 61.5%, best after training (step 100): 69.7%.
+Baseline GSM8K accuracy for Qwen2.5-1.5B-Instruct: 61.5%, best after training (final): 69.4%.

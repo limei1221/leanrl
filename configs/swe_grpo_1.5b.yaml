@@ -27,7 +27,7 @@ training:
   save_steps: 20
   logging_steps: 1
   gradient_checkpointing: true
-  max_seq_len: 3072
+  max_seq_len: 4096
   num_ppo_epochs: 1
   save_best_only: false
   seed: 42
