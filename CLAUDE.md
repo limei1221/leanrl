@@ -23,9 +23,9 @@ apt-get install -y nvidia-cuda-toolkit
 
 ### Lint & Format
 ```bash
-ruff check leanrl/
-ruff check --fix leanrl/  # auto-fix
-ruff format leanrl/       # auto-format
+ruff check .
+ruff check --fix .   # auto-fix
+ruff format .        # auto-format
 ```
 
 Style: line-length 100, target Python 3.10 (configured in pyproject.toml).
@@ -71,7 +71,7 @@ The main loop alternates between three phases per batch:
 
 2. **Training phase** — vLLM sleeps to release GPU memory, reference model offloaded to CPU. Runs PPO epochs: computes log-probs from policy, GRPO loss (clipped surrogate + KL penalty + optional entropy bonus), then optimizer step.
 
-3. **Sync phase** — extracts state dict from DeepSpeed policy, merges Q/K/V → `qkv_proj` and gate/up → `gate_up_proj` for vLLM compatibility, then pushes weights to the Ray actor via `collective_rpc`.
+3. **Sync phase** — extracts state dict from DeepSpeed policy, merges Qwen-style split projections (Q/K/V → `qkv_proj`, gate/up → `gate_up_proj`) for vLLM compatibility, then serializes via `torch.save` to bytes and pushes to the Ray actor via `collective_rpc`.
 
 ### Key Modules
 
@@ -95,7 +95,7 @@ The main loop alternates between three phases per batch:
 - **GPU 0**: Policy model + Reference model. During training, reference model is offloaded to CPU.
 - **GPU 1**: vLLM `RolloutEngine` as Ray actor. During training, enters sleep mode to release VRAM.
 
-Weight sync uses `torch.save`-serialized bytes over `collective_rpc` to survive msgpack serialization limits.
+Weight sync uses `torch.save`-serialized bytes over `collective_rpc` because vLLM's msgpack round-trip clears tensor aux buffers, making raw `torch.Tensor` reconstruction impossible.
 
 ### Async Rollout Prefetching
 
@@ -107,7 +107,7 @@ When `training.async_prefetch: true` and `infra.vllm_enable_sleep: false` (dedic
 - XML: `<bash>cmd</bash>`, `<edit path="file">content</edit>`, `<done/>`
 - Markdown fences: ` ```bash `, ` ```python `, etc.
 
-Non-model tokens (observations/system messages) are masked out during training so only model-generated tokens contribute to the loss.
+Non-model tokens (observations/system messages) are masked out via `response_mask` in `Experience` so only model-generated tokens contribute to the loss. This masking is critical for multi-turn SWE-bench where environment outputs are interleaved with model generations.
 
 ### Configuration
 
@@ -120,4 +120,10 @@ All training hyperparameters are in YAML configs under `configs/`. Key sections:
 - `infra`: `deepspeed_stage` (2 or 3), `offload_optimizer`, `vllm_enable_sleep`
 - `swe` (SWE-bench only): `max_turns`, `sandbox_timeout`, `max_concurrent_sandboxes`
 
-Baseline GSM8K accuracy for Qwen2.5-1.5B-Instruct: 61.5%, best after training (final): 69.4%.
+### Success Thresholds
+
+Success is task-dependent: math uses `reward > 0`, SWE uses `reward > 1.0` (test reward is up to 1.0 and reward shaping adds up to 0.3, so only fully resolved instances exceed 1.0).
+
+### Baselines
+
+GSM8K accuracy for Qwen2.5-1.5B-Instruct: 61.5% baseline → 69.4% after training.

@@ -28,6 +28,13 @@ apt-get install -y nvidia-cuda-toolkit
 
 Training requires a 2-GPU setup: GPU 0 for the policy and reference models (DeepSpeed), GPU 1 for the vLLM rollout engine (Ray).
 
+SWE-bench training requires a container runtime. Docker or [Podman](https://podman.io/) (rootless, useful when Docker is unavailable, e.g. vast.ai) both work — the scripts auto-detect which is available.
+
+```bash
+# If Docker is not available, install Podman instead:
+apt-get install -y podman
+```
+
 ```bash
 # Math (GSM8K/train)
 bash scripts/train_math.sh
