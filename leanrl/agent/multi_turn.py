@@ -325,12 +325,12 @@ class MultiTurnExecutor:
             all_log_probs.extend(result.old_log_probs.tolist())
             all_response_mask.extend([1.0] * len(result.response_ids))
 
-            # Parse action and execute
-            action_type, action_content = parse_action(result.response_text)
-
             # Add model response to message history
             all_response_texts.append(result.response_text)
             messages.append({"role": "assistant", "content": result.response_text})
+
+            # Parse action and execute
+            action_type, action_content = parse_action(result.response_text)
 
             if action_type == ACTION_DONE:
                 traj_stats["used_done"] = True
@@ -354,11 +354,8 @@ class MultiTurnExecutor:
             # Tokenize observation tokens (these are NOT model-generated)
             if tokenizer:
                 obs_text = obs_content
-                if tokenizer and hasattr(tokenizer, "apply_chat_template"):
-                    # Encode just the observation turn as it will appear in the next prompt
-                    obs_tokens = tokenizer.encode(obs_text, add_special_tokens=False)
-                else:
-                    obs_tokens = tokenizer.encode(obs_text, add_special_tokens=False)
+                # Encode just the observation turn as it will appear in the next prompt
+                obs_tokens = tokenizer.encode(obs_text, add_special_tokens=False)
                 # Pad log_probs with zeros for observation tokens (masked out during training)
                 all_response_ids.extend(obs_tokens)
                 all_log_probs.extend([0.0] * len(obs_tokens))

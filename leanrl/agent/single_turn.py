@@ -20,7 +20,7 @@ MATH_SYSTEM_PROMPT = (
 
 
 def build_math_messages(question: str) -> list[dict[str, str]]:
-    """Build the shared chat messages for GSM8K-style math tasks."""
+    """Build the chat messages for GSM8K-style math tasks."""
     return [
         {"role": "system", "content": MATH_SYSTEM_PROMPT},
         {"role": "user", "content": question},
