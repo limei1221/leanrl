@@ -20,7 +20,10 @@ from leanrl.reward.math_reward import extract_gsm8k_answer, numbers_equal
 
 def build_prompt(tokenizer: AutoTokenizer, question: str) -> str:
     return tokenizer.apply_chat_template(
-        build_math_messages(question), tokenize=False, add_generation_prompt=True
+        build_math_messages(question),
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
     )
 
 

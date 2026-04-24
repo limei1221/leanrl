@@ -66,7 +66,10 @@ class SingleTurnExecutor:
             if tokenizer and hasattr(tokenizer, "apply_chat_template"):
                 messages = build_math_messages(p)
                 formatted = tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
                 )
                 formatted_prompts.append(formatted)
             else:
