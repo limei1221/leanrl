@@ -70,18 +70,11 @@ class _DummyDataset(list):
 
 
 def test_main_uses_training_aligned_swe_defaults(monkeypatch):
-    defaults = {
-        "dataset": "custom/swe",
-        "split": "test",
-        "max_turns": 15,
-        "max_new_tokens": 1024,
-    }
     dataset = _DummyDataset([
         {"instance_id": "repo-1", "problem_statement": "Fix the bug"},
     ])
     called = {}
 
-    monkeypatch.setattr(eval_swe, "_load_default_swe_eval_settings", lambda: defaults)
     monkeypatch.setattr(
         sys,
         "argv",

@@ -78,6 +78,41 @@ def format_observation(result: SandboxResult, max_chars: int = 4096) -> str:
     return output
 
 
+def _append_prompt_delta(
+    response_ids: list[int],
+    old_log_probs: list[float],
+    response_mask: list[float],
+    new_prompt_ids: list[int],
+    initial_prompt_ids: list[int],
+) -> bool:
+    """Append chat-template boilerplate between turns as masked context.
+
+    Multi-turn generation re-renders the full chat template every turn. The
+    new turn's prompt should extend the accumulated trajectory
+    (``initial_prompt_ids + response_ids``) as a prefix; the suffix — chat
+    wrapping plus the new user/observation turn — is appended with mask 0 so
+    it does not contribute to the loss.
+
+    Returns False when the new prompt does not extend the accumulated
+    trajectory, which almost always means a previously-generated assistant
+    response did not round-trip cleanly through detokenize→tokenize. Caller
+    should end the trajectory early rather than corrupt the token stream.
+    """
+    accumulated = initial_prompt_ids + response_ids
+    if (
+        len(new_prompt_ids) < len(accumulated)
+        or new_prompt_ids[: len(accumulated)] != accumulated
+    ):
+        return False
+
+    delta = new_prompt_ids[len(accumulated):]
+    if delta:
+        response_ids.extend(delta)
+        old_log_probs.extend([0.0] * len(delta))
+        response_mask.extend([0.0] * len(delta))
+    return True
+
+
 SYSTEM_PROMPT = """You are a helpful assistant that can interact with a computer shell to solve programming tasks.
 You will be given a bug report for a repository checked out at /testbed. Fix the bug by modifying the source code.
 
@@ -266,8 +301,9 @@ class MultiTurnExecutor:
     ) -> tuple[RolloutResult, dict]:
         """Run a single multi-turn trajectory.
 
-        Accumulates all generated tokens into a single RolloutResult,
-        with a response_mask that marks only model-generated tokens.
+        Accumulates the exact rendered chat-token stream into a single
+        RolloutResult, with a response_mask that marks only model-generated
+        tokens.
 
         Returns:
             (rollout, trajectory_stats) where trajectory_stats contains
@@ -291,6 +327,7 @@ class MultiTurnExecutor:
             "successful_actions": 0,
             "files_modified": False,
             "used_done": False,
+            "tokenizer_drift": False,
         }
 
         for turn in range(max_turns):
@@ -319,11 +356,27 @@ class MultiTurnExecutor:
             result = generation_results[0]
             if prompt_ids_tensor is None:
                 prompt_ids_tensor = result.prompt_ids
+            else:
+                appended = _append_prompt_delta(
+                    response_ids=all_response_ids,
+                    old_log_probs=all_log_probs,
+                    response_mask=all_response_mask,
+                    new_prompt_ids=result.prompt_ids.tolist(),
+                    initial_prompt_ids=prompt_ids_tensor.tolist(),
+                )
+                if not appended:
+                    logger.warning(
+                        f"Chat-template re-tokenization drift for {task.instance_id} "
+                        f"at turn {turn + 1}; ending trajectory early."
+                    )
+                    traj_stats["tokenizer_drift"] = True
+                    break
 
             # Accumulate response tokens and log probs
-            all_response_ids.extend(result.response_ids.tolist())
+            generated_ids = result.response_ids.tolist()
+            all_response_ids.extend(generated_ids)
             all_log_probs.extend(result.old_log_probs.tolist())
-            all_response_mask.extend([1.0] * len(result.response_ids))
+            all_response_mask.extend([1.0] * len(generated_ids))
 
             # Add model response to message history
             all_response_texts.append(result.response_text)
@@ -350,16 +403,6 @@ class MultiTurnExecutor:
 
             # Add observation as a new user turn to maintain proper chat format
             messages.append({"role": "user", "content": obs_content})
-
-            # Tokenize observation tokens (these are NOT model-generated)
-            if tokenizer:
-                obs_text = obs_content
-                # Encode just the observation turn as it will appear in the next prompt
-                obs_tokens = tokenizer.encode(obs_text, add_special_tokens=False)
-                # Pad log_probs with zeros for observation tokens (masked out during training)
-                all_response_ids.extend(obs_tokens)
-                all_log_probs.extend([0.0] * len(obs_tokens))
-                all_response_mask.extend([0.0] * len(obs_tokens))
 
         # Check if the model modified any source files
         diff_result = sandbox.execute("cd /testbed && git diff --name-only")
