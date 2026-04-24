@@ -135,6 +135,7 @@ class TestCombinedLoss:
         assert "policy_loss" in metrics
         assert "kl" in metrics
         assert "clip_fraction" in metrics
+        assert "importance_ratio" in metrics
         assert "total_loss" in metrics
         loss.backward()
         assert lp.grad is not None

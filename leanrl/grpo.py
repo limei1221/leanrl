@@ -143,14 +143,18 @@ def grpo_loss(
 
     # Approximate clip fraction for monitoring (reuse ratio from policy loss)
     with torch.no_grad():
+        mask_sum = mask.sum().clamp(min=1)
         clip_frac = ((ratio - 1.0).abs() > clip_range).float()
-        clip_frac = (clip_frac * mask).sum() / mask.sum().clamp(min=1)
+        clip_frac = (clip_frac * mask).sum() / mask_sum
+        # Masked mean of the pre-clip importance ratio exp(log_pi - log_pi_old).
+        mean_ratio = (ratio * mask).sum() / mask_sum
 
     metrics = {
         "policy_loss": policy_loss.item(),
         "kl": kl.item(),
         "entropy": mean_entropy.item(),
         "clip_fraction": clip_frac.item(),
+        "importance_ratio": mean_ratio.item(),
         "total_loss": loss.item(),
     }
     return loss, metrics

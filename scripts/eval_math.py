@@ -86,8 +86,8 @@ def main() -> None:
     parser.add_argument("--model_name_or_path", required=True, help="HuggingFace model ID or local path")
     parser.add_argument("--num_samples", type=int, default=None,
                         help="Number of test samples (default: full test set ~1319)")
-    parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--max_new_tokens", type=int, default=512)
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--max_new_tokens", type=int, default=1024)
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 

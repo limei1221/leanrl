@@ -13,16 +13,16 @@ grpo:
 
 rollout:
   rollout_batch_size: 32
-  max_new_tokens: 512
+  max_new_tokens: 1024
   temperature: 0.7
   top_p: 0.95
 
 training:
-  lr: 5.0e-6
+  lr: 1.0e-6
   weight_decay: 0.01
   warmup_ratio: 0.03
-  train_batch_size: 32
-  micro_batch_size: 4
+  train_batch_size: 64
+  micro_batch_size: 8
   num_epochs: 1
   save_steps: 50
   logging_steps: 1
@@ -30,6 +30,7 @@ training:
   num_ppo_epochs: 1
   save_best_only: true
   async_prefetch: true
+  rollout_prefetch_depth: 2
   seed: 42
 
 data:
@@ -42,12 +43,13 @@ data:
 
 infra:
   vllm_num_engines: 1
-  vllm_gpu_memory_utilization: 0.90
+  vllm_gpu_memory_utilization: 0.70
   vllm_enforce_eager: false
   vllm_enable_sleep: false
   vllm_tensor_parallel_size: 1
   deepspeed_stage: 2
-  offload_optimizer: true
+  offload_optimizer: false
+  weight_sync_interval: 2
   ray_address: "auto"
 
 logging:

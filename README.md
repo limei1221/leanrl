@@ -1,6 +1,6 @@
 # LeanRL
 
-A minimal GRPO (Group Relative Policy Optimization) post-training framework for LLMs, built on Ray, PyTorch, vLLM, and Docker sandboxes. Designed to run on 2–4 GPUs.
+A minimal GRPO (Group Relative Policy Optimization) post-training framework for LLMs, built on Ray, PyTorch, vLLM, and Docker sandboxes. Designed to run on 2 GPUs.
 
 Supported tasks:
 - **Math (GSM8K)** — single-turn generation with rule-based answer verification
@@ -65,21 +65,22 @@ Each training step follows the GRPO loop:
 
 ### GPU Layout (2-GPU)
 
-| GPU | During Rollout | During Training |
-|-----|----------------|-----------------|
-| 0   | Idle           | Policy + Reference (DeepSpeed, optimizer offloaded to CPU) |
-| 1   | vLLM serving   | vLLM sleeping, memory released |
+| GPU | Role |
+|-----|------|
+| 0   | Policy + Reference models (DeepSpeed ZeRO-2). Optional Adam-state CPU offload via `infra.offload_optimizer`. |
+| 1   | vLLM rollout engine. Resident by default; with `infra.vllm_enable_sleep: true` it sleeps between rollouts to free VRAM. |
 
 ### Async Rollout Prefetching
 
-When `training.async_prefetch: true` and `infra.vllm_enable_sleep: false` (dedicated GPUs), the trainer overlaps the next batch's vLLM generation on GPU 1 with training on GPU 0:
+When `training.async_prefetch: true` and `infra.vllm_enable_sleep: false` (dedicated GPUs), the trainer overlaps vLLM generation on GPU 1 with training on GPU 0. A bounded queue of up to `training.rollout_prefetch_depth` rollouts is kept ready on GPU 1; weight sync back to vLLM runs every `infra.weight_sync_interval` training steps (and is forced before eval/checkpoint saves).
 
 ```
-Sequential:  [Generate N] [Train N] [Sync] [Generate N+1] [Train N+1] ...
-Async:       [Generate N] [Train N + Generate N+1] [Sync] [Train N+1 + Generate N+2] ...
+Sequential: [Gen N] [Train N] [Sync] [Gen N+1] [Train N+1] ...
+Async:      [Gen N..N+D] [Train N + background gen/sync] [Train N+1 + ...] ...
+            where D = rollout_prefetch_depth
 ```
 
-This saves up to `min(T_generate, T_train)` per step. The prefetched rollouts use weights that are one step stale, which is handled by PPO/GRPO importance sampling. Only available for single-turn (math) tasks.
+Prefetched rollouts can be up to `rollout_prefetch_depth + weight_sync_interval − 1` steps stale, which is handled by PPO/GRPO importance sampling — watch the `importance_ratio` metric in wandb for actual drift. Only available for single-turn (math) tasks.
 
 ## Configuration
 
@@ -99,16 +100,16 @@ python scripts/eval_swe_oracle.py --num_samples 16  # golden-patch baseline on 1
 
 ## Experiments
 
-Hardware: 2× RTX 4090 (24 GB each), 197 GB RAM, 15 CPU cores, 485 GB disk. Python 3.12.13, PyTorch 2.10.0+cu128.
+Hardware: 2× A100 (80 GB each), ~465 GB RAM cgroup limit, 27.2 vCPUs, 30 GB root overlay (/workspace has 71 TB free). Python 3.12.3, PyTorch 2.10.0+cu128.
 
 ### Math
 
 |  | Model | Accuracy |
 |------------|-------|----------|
-| baseline | Qwen/Qwen2.5-1.5B-Instruct | 61.5%  (811/1319) |
-| exp | output/math_grpo_1.5b/final | 69.4%  (916/1319) |
-| ref1 | Qwen/Qwen2.5-Math-1.5B-Instruct | 84.6%  (1116/1319) |
-| ref2 | Qwen/Qwen2.5-Math-7B-Instruct | 94.1%  (1241/1319) |
+| baseline | Qwen/Qwen3-1.7B | 74.3%  (980/1319) |
+| exp | output/math_grpo_1.5b/final | 84.2%  (1111/1319) |
+| ref1 | Qwen/Qwen2.5-Math-1.5B-Instruct | 85.1%  (1123/1319) |
+| ref2 | Qwen/Qwen2.5-Math-7B-Instruct | 95.3%  (1257/1319) |
 
 ### Coding
 max_turns=10, max_new_tokens=512

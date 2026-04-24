@@ -335,7 +335,10 @@ class MultiTurnExecutor:
 
             if tokenizer and hasattr(tokenizer, "apply_chat_template"):
                 conversation = tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
                 )
             else:
                 conversation = "\n".join(m["content"] for m in messages)

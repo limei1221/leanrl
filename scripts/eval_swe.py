@@ -87,7 +87,10 @@ def run_trajectory(
         turn = -1
         for turn in range(max_turns):
             conversation = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
             )
 
             # Serialize GPU inference: only one thread may call generate() at a time.

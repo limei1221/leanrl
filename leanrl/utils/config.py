@@ -55,6 +55,7 @@ class TrainingConfig:
     save_best_only: bool = False
     max_seq_len: int = -1  # truncate sequences longer than this (-1 = no limit)
     async_prefetch: bool = False
+    rollout_prefetch_depth: int = 1
     seed: int = 42
 
 
@@ -78,6 +79,7 @@ class InfraConfig:
     vllm_tensor_parallel_size: int = 1
     deepspeed_stage: int = 2
     offload_optimizer: bool = False
+    weight_sync_interval: int = 1
     ray_address: Optional[str] = None
 
 

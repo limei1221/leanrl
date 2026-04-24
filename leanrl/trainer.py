@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import time
+from collections import deque
 from pathlib import Path
 
 import ray
@@ -37,6 +38,7 @@ class GRPOTrainer:
         )
         self.global_step = 0
         self.best_eval_metric = -1.0
+        self._vllm_sync_skipped_total = 0
 
     def _setup_infrastructure(self):
         """Initialize Ray cluster."""
@@ -168,6 +170,41 @@ class GRPOTrainer:
             return False
         return True
 
+    def _rollout_prefetch_depth(self) -> int:
+        return max(1, int(getattr(self.config.training, "rollout_prefetch_depth", 1)))
+
+    def _weight_sync_interval(self) -> int:
+        return max(1, int(getattr(self.config.infra, "weight_sync_interval", 1)))
+
+    def _should_sync_vllm_after_step(self) -> bool:
+        interval = self._weight_sync_interval()
+        return (self.global_step + 1) % interval == 0
+
+    def _needs_fresh_vllm_for_checkpoint(self) -> bool:
+        cfg = self.config
+        return (
+            cfg.training.save_steps > 0
+            and self.global_step > 0
+            and self.global_step % cfg.training.save_steps == 0
+            and cfg.training.save_best_only
+            and self.eval_loader is not None
+        )
+
+    def _start_vllm_weight_sync(self):
+        state_dict = self.policy.get_state_dict_for_vllm()
+        future = self.rollout_engine.update_weights.remote(state_dict)
+        del state_dict  # Ray serializes synchronously before returning.
+        return future
+
+    def _clear_completed_weight_sync(self, sync_future):
+        if sync_future is None:
+            return None
+        ready, _ = ray.wait([sync_future], timeout=0)
+        if ready:
+            ray.get(ready[0])
+            return None
+        return sync_future
+
     def train(self):
         """Main GRPO training loop."""
         cfg = self.config
@@ -237,29 +274,35 @@ class GRPOTrainer:
                 # Bring reference model back for next rollout
                 self.ref_model.reload_to_gpu()
 
-                # --- Sync weights back to vLLM ---
+                # --- Wake vLLM and sync weights back when scheduled ---
                 if self.config.infra.vllm_enable_sleep:
                     try:
                         ray.get(self.rollout_engine.wake_up.remote())
                     except Exception:
                         pass
 
-                state_dict = self.policy.get_state_dict_for_vllm()
-                future = self.rollout_engine.update_weights.remote(state_dict)
-                del state_dict  # Ray serializes synchronously before returning the future,
-                                # so the trainer-side copy can be freed immediately
-                ray.get(future)
+                if (
+                    self._should_sync_vllm_after_step()
+                    or self._needs_fresh_vllm_for_checkpoint()
+                ):
+                    ray.get(self._start_vllm_weight_sync())
 
                 self._log_and_checkpoint(experience, train_metrics, step_start, epoch)
 
     def _train_async(self):
-        """Async prefetch loop: overlaps next rollout generation with training.
+        """Async prefetch loop with a bounded rollout queue.
 
         Timeline per step:
-          [GPU 0] train on N             [GPU 1] Generate N+1 (async)
-          [GPU 0] ref_logprobs for N+1   [GPU 1] weight sync
+          [GPU 0] train on N             [GPU 1] generate queued batches
+          [GPU 0] ref_logprobs for N+1   [GPU 1] weight sync / more generation
         """
         cfg = self.config
+        prefetch_depth = self._rollout_prefetch_depth()
+        sync_interval = self._weight_sync_interval()
+        logger.info(
+            f"Async rollout prefetch depth={prefetch_depth}, "
+            f"vLLM weight_sync_interval={sync_interval}"
+        )
 
         for epoch in range(cfg.training.num_epochs):
             logger.info(f"Epoch {epoch + 1}/{cfg.training.num_epochs}")
@@ -267,6 +310,11 @@ class GRPOTrainer:
             batches = list(self.train_loader)
             if not batches:
                 continue
+            if cfg.training.max_steps > 0:
+                remaining_steps = cfg.training.max_steps - self.global_step
+                if remaining_steps <= 0:
+                    break
+                batches = batches[:remaining_steps]
 
             # First batch: synchronous rollout (no overlap possible yet)
             first_batch = batches[0]
@@ -276,45 +324,84 @@ class GRPOTrainer:
                 tokenizer=self.tokenizer,
             )
 
-            for batch_idx in range(len(batches)):
-                if cfg.training.max_steps > 0 and self.global_step >= cfg.training.max_steps:
-                    break
+            pending_rollouts = deque()
+            next_prefetch_idx = 1
+            pending_sync = None
 
+            def fill_rollout_queue():
+                nonlocal next_prefetch_idx
+                while (
+                    next_prefetch_idx < len(batches)
+                    and len(pending_rollouts) < prefetch_depth
+                ):
+                    batch = batches[next_prefetch_idx]
+                    future, expanded_labels, G = self.executor.start_rollout(
+                        prompts=batch["prompts"],
+                        labels=batch["labels"],
+                        tokenizer=self.tokenizer,
+                    )
+                    pending_rollouts.append((future, expanded_labels, G))
+                    next_prefetch_idx += 1
+
+            fill_rollout_queue()
+
+            for batch_idx in range(len(batches)):
                 step_start = time.time()
                 has_next = batch_idx + 1 < len(batches)
 
-                # Start next batch's rollout generation on GPU 1 (async)
-                prefetch_future = None
-                prefetch_labels = None
-                prefetch_G = None
-                if has_next:
-                    next_batch = batches[batch_idx + 1]
-                    prefetch_future, prefetch_labels, prefetch_G = (
-                        self.executor.start_rollout(
-                            prompts=next_batch["prompts"],
-                            labels=next_batch["labels"],
-                            tokenizer=self.tokenizer,
-                        )
-                    )
-
-                # Train on current experience (GPU 0)
+                # Train on current experience (GPU 0).
                 self.ref_model.offload_to_cpu()
                 train_metrics = self._train_on_experience(experience)
                 self.ref_model.reload_to_gpu()
 
-                # Sync updated weights to vLLM
-                state_dict = self.policy.get_state_dict_for_vllm()
-                future = self.rollout_engine.update_weights.remote(state_dict)
-                del state_dict
-                ray.get(future)
+                pending_sync = self._clear_completed_weight_sync(pending_sync)
+                fresh_sync_required = self._needs_fresh_vllm_for_checkpoint()
+                sync_due = self._should_sync_vllm_after_step() or fresh_sync_required
+
+                if fresh_sync_required:
+                    if pending_sync is not None:
+                        ray.get(pending_sync)
+                    pending_sync = self._start_vllm_weight_sync()
+                elif sync_due:
+                    if pending_sync is None:
+                        pending_sync = self._start_vllm_weight_sync()
+                    else:
+                        self._vllm_sync_skipped_total += 1
+                        logger.info(
+                            "Previous vLLM weight sync is still pending; "
+                            "skipping this scheduled sync "
+                            f"(total skipped={self._vllm_sync_skipped_total})"
+                        )
+
+                # Build next experience on GPU 0 while GPU 1 continues with
+                # queued generation or the weight sync above.
+                next_experience = None
+                if has_next:
+                    if not pending_rollouts:
+                        fill_rollout_queue()
+                    rollout_future, expanded_labels, G = pending_rollouts.popleft()
+                    next_experience = self.executor.finish_experience(
+                        rollout_future,
+                        expanded_labels,
+                        G,
+                        self.tokenizer,
+                    )
+
+                # Eval/checkpoint rollouts should see weights from the just
+                # completed train step. Normal training can tolerate bounded
+                # staleness from the prefetch queue.
+                if fresh_sync_required and pending_sync is not None:
+                    ray.get(pending_sync)
+                    pending_sync = None
 
                 self._log_and_checkpoint(experience, train_metrics, step_start, epoch)
 
-                # Build experience from prefetched rollouts (ref_logprobs on GPU 0)
-                if prefetch_future is not None:
-                    experience = self.executor.finish_experience(
-                        prefetch_future, prefetch_labels, prefetch_G, self.tokenizer
-                    )
+                if has_next:
+                    fill_rollout_queue()
+                    experience = next_experience
+
+            if pending_sync is not None:
+                ray.get(pending_sync)
 
     def _log_and_checkpoint(
         self, experience: Experience, train_metrics: dict, step_start: float, epoch: int,
@@ -330,6 +417,7 @@ class GRPOTrainer:
         step_metrics["reward_std"] = experience.rewards.std().item()
         step_metrics["pass_rate"] = success_mask.float().mean().item()
         step_metrics["epoch"] = epoch + 1
+        step_metrics["vllm_sync_skipped_total"] = self._vllm_sync_skipped_total
 
         if self.global_step % cfg.training.logging_steps == 0:
             self.metrics.log(step_metrics, step=self.global_step)

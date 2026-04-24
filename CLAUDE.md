@@ -21,6 +21,14 @@ apt-get install -y libopenmpi-dev openmpi-bin
 apt-get install -y nvidia-cuda-toolkit
 ```
 
+**flash-attn note**: prebuilt wheels on the Dao-AILab releases page are pinned to specific torch minor versions (e.g. v2.8.3 → torch 2.8). With a newer torch (e.g. 2.10) you get an `undefined symbol` on import and must source-build. On a cgroup-limited container (e.g. RunPod ~465 GB memory cap) use `MAX_JOBS=8` to avoid OOM during the backward-hdim CUDA kernels:
+```bash
+MAX_JOBS=8 TORCH_CUDA_ARCH_LIST="8.0" FLASH_ATTENTION_FORCE_BUILD=TRUE \
+  CUDA_HOME=/usr/local/cuda \
+  pip install -v --no-build-isolation flash-attn==2.8.3
+```
+Restrict `TORCH_CUDA_ARCH_LIST` to just the target arch (e.g. `"8.0"` for A100) to cut build time.
+
 ### Lint & Format
 ```bash
 ruff check .
@@ -69,7 +77,7 @@ The main loop alternates between three phases per batch:
 
 1. **Rollout phase** — vLLM active on GPU 1, training GPU idle. Generates G samples per prompt via `RolloutEngine`, scores them with the reward function, computes GRPO advantages (group-normalized: `(r - mean) / (std + eps)`).
 
-2. **Training phase** — vLLM sleeps to release GPU memory, reference model offloaded to CPU. Runs PPO epochs: computes log-probs from policy, GRPO loss (clipped surrogate + KL penalty + optional entropy bonus), then optimizer step.
+2. **Training phase** — reference model offloaded to CPU. vLLM releases VRAM only if `infra.vllm_enable_sleep: true`; with dedicated GPUs it stays resident. Runs PPO epochs: computes log-probs from policy, GRPO loss (clipped surrogate + KL penalty + optional entropy bonus), then optimizer step.
 
 3. **Sync phase** — extracts state dict from DeepSpeed policy, merges Qwen-style split projections (Q/K/V → `qkv_proj`, gate/up → `gate_up_proj`) for vLLM compatibility, then serializes via `torch.save` to bytes and pushes to the Ray actor via `collective_rpc`.
 
@@ -92,14 +100,16 @@ The main loop alternates between three phases per batch:
 
 ### GPU Memory Layout (2×GPU setup)
 
-- **GPU 0**: Policy model + Reference model. During training, reference model is offloaded to CPU.
-- **GPU 1**: vLLM `RolloutEngine` as Ray actor. During training, enters sleep mode to release VRAM.
+- **GPU 0**: Policy model + Reference model (DeepSpeed ZeRO-2 by default). Reference model is always offloaded to CPU during the training phase. Adam states offload to CPU iff `infra.offload_optimizer: true`.
+- **GPU 1**: vLLM `RolloutEngine` as Ray actor. Resident by default; only sleeps between rollouts when `infra.vllm_enable_sleep: true`.
 
 Weight sync uses `torch.save`-serialized bytes over `collective_rpc` because vLLM's msgpack round-trip clears tensor aux buffers, making raw `torch.Tensor` reconstruction impossible.
 
 ### Async Rollout Prefetching
 
-When `training.async_prefetch: true` and `infra.vllm_enable_sleep: false` (dedicated GPUs), the trainer overlaps the next batch's vLLM generation on GPU 1 with training on GPU 0. Prefetched rollouts use weights one step stale, handled by importance sampling. Only available for single-turn (math) tasks.
+When `training.async_prefetch: true` and `infra.vllm_enable_sleep: false` (dedicated GPUs), `_train_async` maintains a bounded queue of up to `training.rollout_prefetch_depth` pre-generated rollouts on GPU 1 and overlaps generation with training on GPU 0. Weight sync back to vLLM runs every `infra.weight_sync_interval` training steps (forced before eval/checkpoint saves); a new sync is silently skipped if the previous one is still pending, tracked via `self._vllm_sync_skipped_total` and exposed in the `vllm_sync_skipped_total` wandb metric.
+
+Max rollout staleness = `rollout_prefetch_depth + weight_sync_interval − 1` steps. `grpo.py` emits `importance_ratio` (masked mean pre-clip `exp(log_pi − log_pi_old)`) and `clip_fraction` so drift is visible in wandb. Only available for single-turn (math) tasks.
 
 ### SWE-bench Agent Actions
 
@@ -116,8 +126,8 @@ All training hyperparameters are in YAML configs under `configs/`. Key sections:
 - `model`: `model_name_or_path`, optional `ref_model_name_or_path` (defaults to same model)
 - `grpo`: `n_samples_per_prompt` (G), `kl_coef`, `clip_range`, `entropy_coef`
 - `rollout`: `rollout_batch_size`, `max_new_tokens`, `temperature`
-- `training`: `lr`, `micro_batch_size`, `train_batch_size`, `num_ppo_epochs`, `max_steps` (-1 = full dataset), `max_seq_len` (-1 = no truncation)
-- `infra`: `deepspeed_stage` (2 or 3), `offload_optimizer`, `vllm_enable_sleep`
+- `training`: `lr`, `micro_batch_size`, `train_batch_size` (→ `grad_accum = train_batch_size / micro_batch_size`), `num_ppo_epochs`, `max_steps` (-1 = full dataset), `max_seq_len` (-1 = no truncation), `async_prefetch`, `rollout_prefetch_depth` (queue depth when async)
+- `infra`: `deepspeed_stage` (2 or 3), `offload_optimizer`, `vllm_enable_sleep`, `vllm_gpu_memory_utilization`, `weight_sync_interval` (sync vLLM weights every N training steps when async)
 - `swe` (SWE-bench only): `max_turns`, `sandbox_timeout`, `max_concurrent_sandboxes`
 
 ### Success Thresholds
@@ -126,4 +136,4 @@ Success is task-dependent: math uses `reward > 0`, SWE uses `reward > 1.0` (test
 
 ### Baselines
 
-GSM8K accuracy for Qwen2.5-1.5B-Instruct: 61.5% baseline → 69.4% after training.
+GSM8K accuracy for Qwen/Qwen3-1.7B (thinking disabled): 74.3% baseline → 84.2% after GRPO training. See `README.md` for the full experiment table including math-specialized reference models.
