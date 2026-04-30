@@ -47,7 +47,18 @@ pytest tests/test_grpo.py          # single file
 pytest tests/test_grpo.py::test_fn # single test
 ```
 
-All tests are mock-based and run without a GPU.
+All tests are mock-based and run without a GPU. Coverage map:
+
+| File | What it exercises |
+|------|-------------------|
+| `tests/test_grpo.py` | advantage normalization, KL (k3) estimator, clipped surrogate loss |
+| `tests/test_multi_turn.py` | SWE action parsing, prompt-delta re-tokenization, batched rollout dispatch |
+| `tests/test_sandbox.py` | `DockerSandbox` + `SandboxPool` |
+| `tests/test_rollout.py` | vLLM `RolloutEngine` actor wrapping |
+| `tests/test_trainer.py` | `GRPOTrainer` wiring with mocked Ray/vLLM/DeepSpeed |
+| `tests/test_eval_swe.py` | eval pipeline |
+
+`pyproject.toml` sets `pythonpath = ["scripts"]`, so the eval-script tests import `eval_swe.py` etc. directly.
 
 ### Train (also available as `leanrl-train` CLI)
 ```bash
@@ -60,7 +71,7 @@ CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 bash scripts/train_math.sh
 
 # SWE-bench — setup Docker images first
-bash scripts/setup_swe_docker.sh
+bash scripts/setup_swe_docker.sh   # thin wrapper around scripts/setup_swe_docker.py
 bash scripts/train_swe.sh
 ```
 
@@ -70,6 +81,10 @@ python scripts/eval_math.py --model_name_or_path <checkpoint>/final --batch_size
 python scripts/eval_swe.py --model_name_or_path <checkpoint>/final --num_gpus 1
 python scripts/eval_swe_oracle.py  # golden patch baseline (resolve_rate: 0.86)
 ```
+
+Eval datasets:
+- Math: GSM8K test split (1319 problems).
+- SWE: `eval_swe.py` defaults to a 16-sample subset of SWE-bench_Lite test; `eval_swe_oracle.py` runs the full 300 (golden-patch baseline). README suggests switching to `princeton-nlp/SWE-bench_Verified` when feasible.
 
 ## Architecture
 
@@ -107,6 +122,11 @@ The main loop alternates between three phases per batch:
 
 Weight sync uses `torch.save`-serialized bytes over `collective_rpc` because vLLM's msgpack round-trip clears tensor aux buffers, making raw `torch.Tensor` reconstruction impossible.
 
+### Memory Invariants
+
+- **Gradient checkpointing requires `use_cache = False`.** `PolicyModel.__init__` sets `model.config.use_cache = False` whenever `training.gradient_checkpointing: true`. HuggingFace silently bypasses checkpointing if `use_cache` is left True, and activations grow per layer.
+- **Per-token log-probs avoid materializing `log_softmax`.** All three logprob paths in `models.py` compute `shift_logits.gather(...) − logsumexp(shift_logits, -1)` instead of `log_softmax(...).gather(...)` — the latter materializes a `(B, T−1, V)` tensor (~5 GB for Qwen3 at 8k tokens) that dominates the GRPO step's peak. Entropy still requires a softmax pass; it is only computed when `entropy_coef > 0`.
+
 ### Async Rollout Prefetching
 
 When `training.async_prefetch: true` and `infra.vllm_enable_sleep: false` (dedicated GPUs), `_train_async` maintains a bounded queue of up to `training.rollout_prefetch_depth` pre-generated rollouts on GPU 1 and overlaps generation with training on GPU 0. Weight sync back to vLLM runs every `infra.weight_sync_interval` training steps (forced before eval/checkpoint saves); a new sync is silently skipped if the previous one is still pending, tracked via `self._vllm_sync_skipped_total` and exposed in the `vllm_sync_skipped_total` wandb metric.
@@ -120,6 +140,10 @@ Max rollout staleness = `rollout_prefetch_depth + weight_sync_interval − 1` st
 - Markdown fences: ` ```bash `, ` ```python `, etc.
 
 Non-model tokens (observations/system messages) are masked out via `response_mask` in `Experience` so only model-generated tokens contribute to the loss. This masking is critical for multi-turn SWE-bench where environment outputs are interleaved with model generations.
+
+### SWE-bench Batched Multi-Turn Rollouts
+
+`MultiTurnExecutor._run_batched_rollouts` keeps a bounded set of live trajectories (≤ `swe.max_concurrent_sandboxes`) and issues **one vLLM `generate.remote` call per turn** containing every active conversation. Sandboxes stream in/out as trajectories admit/finish; pool keys (`<instance_id>__sample_<s>_<i>` via `_pool_task`) keep G samples per task isolated while reusing the original Docker image. During multi-turn `_refresh_old_logprobs`, the ref model is briefly offloaded so the policy forward fits on GPU 0; it is reloaded for its own pass right after.
 
 ### Configuration
 
