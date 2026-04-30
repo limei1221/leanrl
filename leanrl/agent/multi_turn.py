@@ -114,20 +114,16 @@ def _append_prompt_delta(
     return True
 
 
-SYSTEM_PROMPT = """You are a helpful assistant that can interact with a computer shell to solve programming tasks.
-You will be given a bug report for a repository checked out at /testbed. Fix the bug by modifying the source code.
+SYSTEM_PROMPT = """Fix the bug in the repo at /testbed.
 
-For each response, include your reasoning, then a bash command wrapped in <bash>...</bash> tags.
-When you are finished, write <done/>.
+Format every turn as: brief reasoning in plain text, then a bash command in <bash>...</bash>. The <bash> block must contain shell commands only — no comments, no prose. Emit <done/> when the fix is complete and tests pass.
 
-Important rules:
-- Only bash actions are allowed. Use shell tools (sed, awk, cat, grep, python3 -c, etc.) to inspect and edit files.
-- Do not use interactive editors (vi, nano, emacs).
-- Each action runs in a fresh shell, so always use: cd /testbed && ...
-- Pipe long outputs through head or tail to keep them short.
-- Only modify source code files, not tests or configuration.
-- Run relevant tests before finishing to verify your fix.
-- Emit <done/> when finished."""
+Rules:
+- Each action runs in a fresh shell. Start with `cd /testbed && ...`.
+- Read files in bounded ranges with `sed -n '<a>,<b>p'`, `head`, `tail`, or `grep -n`. Never `cat` a source file.
+- No interactive editors (vi/nano/emacs).
+- Modify source files only — do not change tests or configuration.
+- Run the relevant tests before emitting <done/>."""
 
 
 def build_initial_prompt(problem_statement: str) -> list[dict[str, str]]:
@@ -138,6 +134,12 @@ def build_initial_prompt(problem_statement: str) -> list[dict[str, str]]:
     ]
 
 
+# `cat <file>` invocations waste context (whole-file dump). Match `cat`
+# preceded by start/separator and NOT followed by `<<` (heredoc writes are
+# legitimate). `cat < file` (single-redirect read) still counts.
+_CAT_PAT = re.compile(r"(?:^|[\s;&|`(])cat\b(?!\s*<<)")
+
+
 def _new_stats() -> dict:
     return {
         "total_turns": 0,
@@ -146,6 +148,7 @@ def _new_stats() -> dict:
         "files_modified": False,
         "used_done": False,
         "tokenizer_drift": False,
+        "cat_invocations": 0,
     }
 
 
@@ -466,6 +469,7 @@ class MultiTurnExecutor:
             t.active = False
             return None
         t.stats["valid_actions"] += 1
+        t.stats["cat_invocations"] += len(_CAT_PAT.findall(action_content))
         return action_content
 
     def _finalize_traj(self, t: _Traj, tokenizer) -> tuple[RolloutResult, float]:

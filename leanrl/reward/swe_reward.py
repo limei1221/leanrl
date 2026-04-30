@@ -98,15 +98,16 @@ def compute_trajectory_reward(trajectory_stats: dict) -> float:
     """Compute a dense shaped reward from trajectory-level signals.
 
     Rewards intermediate progress so the model gets nonzero signal even when
-    it doesn't pass any tests.  Each component is in [0, 1] and weighted so
-    that the total shaping reward is in [0, 0.3] — always dominated by test
-    pass rewards (up to 1.0).
+    it doesn't pass any tests. Positive components are weighted to total
+    [0, 0.3]; the cat penalty subtracts up to 0.1 — final shaping range is
+    [-0.1, 0.3], always dominated by test pass rewards (up to 1.0).
 
     Components:
         valid_action_rate:  fraction of turns that produced a parseable action (×0.05)
         success_rate:       fraction of actions that executed with exit_code 0 (×0.05)
         files_modified:     whether the model modified any source files       (×0.1)
         used_done:          whether the model signalled <done/>               (×0.1)
+        cat_penalty:        −0.02 per `cat <file>` invocation, capped at −0.1
     """
     turns = trajectory_stats.get("total_turns", 0)
     if turns == 0:
@@ -116,15 +117,18 @@ def compute_trajectory_reward(trajectory_stats: dict) -> float:
     success = trajectory_stats.get("successful_actions", 0)
     modified = trajectory_stats.get("files_modified", False)
     used_done = trajectory_stats.get("used_done", False)
+    cat_invocations = trajectory_stats.get("cat_invocations", 0)
 
     valid_rate = valid / turns
     success_rate = success / max(valid, 1)
+    cat_penalty = min(0.1, 0.02 * cat_invocations)
 
     return (
         0.05 * valid_rate
         + 0.05 * success_rate
         + 0.1 * float(modified)
         + 0.1 * float(used_done)
+        - cat_penalty
     )
 
 
