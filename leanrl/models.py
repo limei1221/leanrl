@@ -136,6 +136,9 @@ class PolicyModel:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         if training_cfg.gradient_checkpointing:
+            # gradient_checkpointing requires use_cache=False; otherwise HF
+            # silently bypasses checkpointing and activations grow per layer.
+            self.model.config.use_cache = False
             self.model.gradient_checkpointing_enable()
 
         ds_config = get_deepspeed_config(infra_cfg, training_cfg, total_steps)
@@ -175,10 +178,12 @@ class PolicyModel:
         logits = outputs.logits
         shift_logits = logits[:, :-1, :]
         shift_labels = input_ids[:, 1:]
-        log_probs = F.log_softmax(shift_logits, dim=-1)
-        per_token_lp = log_probs.gather(
-            dim=-1, index=shift_labels.unsqueeze(-1),
-        ).squeeze(-1)
+        # log_softmax + gather would materialize a (B, T-1, V) tensor (~5 GB
+        # for Qwen3 at 8k tokens). Compute per-token log-prob directly.
+        per_token_lp = (
+            shift_logits.gather(dim=-1, index=shift_labels.unsqueeze(-1)).squeeze(-1)
+            - torch.logsumexp(shift_logits, dim=-1)
+        )
         return _extract_response_logprobs(
             per_token_lp=per_token_lp,
             attention_mask=attention_mask,
@@ -211,21 +216,22 @@ class PolicyModel:
         shift_logits = logits[:, :-1, :]
         shift_labels = input_ids[:, 1:]
 
-        log_probs_full = F.log_softmax(shift_logits, dim=-1)
-        per_token_lp = log_probs_full.gather(
-            dim=-1, index=shift_labels.unsqueeze(-1),
-        ).squeeze(-1)
-
-        # log_softmax backward only needs its output, not input — free early.
-        del outputs, logits, shift_logits
+        # Avoid materializing log_softmax (B, T-1, V) — that tensor alone is
+        # ~5 GB for Qwen3 at 8k tokens and dominates the GRPO step's peak.
+        lse = torch.logsumexp(shift_logits, dim=-1)
+        per_token_lp = (
+            shift_logits.gather(dim=-1, index=shift_labels.unsqueeze(-1)).squeeze(-1)
+            - lse
+        )
 
         if compute_entropy:
-            # Per-token entropy: H = -sum_v p(v) * log p(v)
-            per_token_entropy = -(log_probs_full.exp() * log_probs_full).sum(dim=-1)
-            del log_probs_full
+            # H = lse - sum_v softmax(x)_v * x_v. softmax materialization is
+            # unavoidable here; only entered when entropy_coef > 0.
+            per_token_entropy = lse - (F.softmax(shift_logits, dim=-1) * shift_logits).sum(dim=-1)
         else:
-            del log_probs_full
             per_token_entropy = per_token_lp.new_zeros(per_token_lp.shape)
+
+        del outputs, logits, shift_logits, lse
 
         resp_lp = _extract_response_logprobs(
             per_token_lp=per_token_lp,
@@ -360,8 +366,10 @@ class ReferenceModel:
         shift_logits = logits[:, :-1, :]
         shift_labels = input_ids[:, 1:]
 
-        log_probs = F.log_softmax(shift_logits, dim=-1)
-        per_token_lp = log_probs.gather(dim=-1, index=shift_labels.unsqueeze(-1)).squeeze(-1)
+        per_token_lp = (
+            shift_logits.gather(dim=-1, index=shift_labels.unsqueeze(-1)).squeeze(-1)
+            - torch.logsumexp(shift_logits, dim=-1)
+        )
 
         return _extract_response_logprobs(
             per_token_lp=per_token_lp,

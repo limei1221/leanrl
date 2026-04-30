@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 
 import torch
 from torch import Tensor
@@ -137,6 +138,49 @@ def build_initial_prompt(problem_statement: str) -> list[dict[str, str]]:
     ]
 
 
+def _new_stats() -> dict:
+    return {
+        "total_turns": 0,
+        "valid_actions": 0,
+        "successful_actions": 0,
+        "files_modified": False,
+        "used_done": False,
+        "tokenizer_drift": False,
+    }
+
+
+def _pool_task(task: TaskInstance, pool_key: str) -> TaskInstance:
+    """Clone a TaskInstance with a unique pool key but the original Docker image."""
+    image = task.docker_image or f"sweb.eval.x86_64.{task.instance_id}:latest"
+    return TaskInstance(
+        instance_id=pool_key,
+        repo=task.repo,
+        base_commit=task.base_commit,
+        test_patch=task.test_patch,
+        fail_to_pass=task.fail_to_pass,
+        pass_to_pass=task.pass_to_pass,
+        problem_statement=task.problem_statement,
+        docker_image=image,
+    )
+
+
+@dataclass
+class _Traj:
+    """Per-trajectory mutable state for a batched multi-turn rollout."""
+
+    task: TaskInstance
+    pool_key: str
+    messages: list[dict[str, str]]
+    sandbox: DockerSandbox | None = None
+    prompt_ids: Tensor | None = None
+    response_ids: list[int] = field(default_factory=list)
+    log_probs: list[float] = field(default_factory=list)
+    response_mask: list[float] = field(default_factory=list)
+    response_texts: list[str] = field(default_factory=list)
+    stats: dict = field(default_factory=_new_stats)
+    active: bool = True
+
+
 class MultiTurnExecutor:
     """Executes multi-turn agent interactions for SWE-bench tasks.
 
@@ -186,23 +230,7 @@ class MultiTurnExecutor:
         G = cfg.grpo.n_samples_per_prompt
 
         tasks = self._parse_tasks(prompts, labels)
-
-        all_rollouts: list[RolloutResult] = []
-        all_rewards: list[float] = []
-
-        max_workers = self.config.swe.max_concurrent_sandboxes
-        with ThreadPoolExecutor(max_workers=min(len(tasks), max_workers)) as executor:
-            futures = {
-                executor.submit(self._run_task_rollouts, task, G, tokenizer): i
-                for i, task in enumerate(tasks)
-            }
-            results: list[tuple] = [None] * len(tasks)
-            for future in as_completed(futures):
-                results[futures[future]] = future.result()
-
-        for task_rollouts, task_rewards in results:
-            all_rollouts.extend(task_rollouts)
-            all_rewards.extend(task_rewards)
+        all_rollouts, all_rewards = self._run_batched_rollouts(tasks, G, tokenizer)
 
         rewards = torch.tensor(all_rewards, dtype=torch.float32)
         advantages = compute_grpo_advantages(rewards, G, eps=cfg.grpo.advantage_eps)
@@ -213,7 +241,13 @@ class MultiTurnExecutor:
             from leanrl.experience import truncate_rollout
             all_rollouts = [truncate_rollout(r, max_seq_len) for r in all_rollouts]
 
+        # Free GPU 0 for the policy forward in _refresh_old_logprobs over long
+        # multi-turn sequences; bring the ref model back for its own pass.
+        if self.ref_model is not None:
+            self.ref_model.offload_to_cpu()
         self._refresh_old_logprobs(all_rollouts, tokenizer)
+        if self.ref_model is not None:
+            self.ref_model.reload_to_gpu()
         ref_log_probs_list = self._compute_ref_logprobs(all_rollouts, tokenizer)
 
         experience = self._build_experience(
@@ -256,185 +290,210 @@ class MultiTurnExecutor:
             ))
         return tasks
 
-    def _run_task_rollouts(
+    def _run_batched_rollouts(
         self,
-        task: TaskInstance,
+        tasks: list[TaskInstance],
         n_samples: int,
         tokenizer,
     ) -> tuple[list[RolloutResult], list[float]]:
-        """Run G independent rollouts for a single task.
+        """Drive all task/sample trajectories with one batched vLLM call per turn.
 
-        Each rollout gets its own sandbox (or resets the sandbox between runs).
+        Sandboxes stream in/out so live containers stay capped at
+        ``max_concurrent_sandboxes`` while every in-flight conversation is
+        sent to vLLM as a single batch.
         """
-        rollouts = []
-        rewards = []
-        max_turns = self.config.swe.max_turns
+        import ray
 
-        for sample_idx in range(n_samples):
-            try:
-                sandbox = self.sandbox_pool.get_sandbox(task)
-            except Exception as e:
-                logger.warning(f"Sandbox creation failed for {task.instance_id}: {e}")
-                rollouts.append(self._make_empty_rollout(task, tokenizer))
-                rewards.append(0.0)
-                continue
+        cfg = self.config
+        max_concurrent = max(1, cfg.swe.max_concurrent_sandboxes)
+        max_turns = cfg.swe.max_turns
 
-            try:
-                trajectory, traj_stats = self._run_single_trajectory(
-                    task, sandbox, max_turns, tokenizer
-                )
-                reward, info = compute_swe_reward(sandbox, task, traj_stats)
-                rollouts.append(trajectory)
-                rewards.append(reward)
-            except Exception as e:
-                logger.warning(f"Trajectory failed for {task.instance_id} sample {sample_idx}: {e}")
-                rollouts.append(self._make_empty_rollout(task, tokenizer))
-                rewards.append(0.0)
-            finally:
-                self.sandbox_pool.release_sandbox(task.instance_id)
+        queue: list[_Traj] = []
+        for task_idx, task in enumerate(tasks):
+            for s in range(n_samples):
+                queue.append(_Traj(
+                    task=task,
+                    pool_key=f"{task.instance_id}__sample_{s}_{task_idx * n_samples + s}",
+                    messages=build_initial_prompt(task.problem_statement),
+                ))
+        if not queue:
+            return [], []
+
+        waiting = list(queue)
+        active: list[_Traj] = []
+        pool = ThreadPoolExecutor(max_workers=max_concurrent)
+        try:
+            while waiting or active:
+                slots = max_concurrent - len(active)
+                if slots > 0 and waiting:
+                    admitted, waiting = waiting[:slots], waiting[slots:]
+                    sb_futs = {
+                        pool.submit(self.sandbox_pool.get_sandbox,
+                                    _pool_task(t.task, t.pool_key)): t
+                        for t in admitted
+                    }
+                    for fut in as_completed(sb_futs):
+                        t = sb_futs[fut]
+                        try:
+                            t.sandbox = fut.result()
+                            active.append(t)
+                        except Exception as e:
+                            logger.warning(
+                                f"Sandbox creation failed for {t.task.instance_id}: {e}"
+                            )
+
+                if not active:
+                    continue
+
+                for t in active:
+                    t.stats["total_turns"] += 1
+                conversations = [self._render(t.messages, tokenizer) for t in active]
+                try:
+                    results = ray.get(self.rollout_engine.generate.remote(
+                        conversations,
+                        n_samples=1,
+                        max_new_tokens=cfg.rollout.max_new_tokens,
+                        temperature=cfg.rollout.temperature,
+                    ))
+                except Exception as e:
+                    logger.warning(f"Batched SWE generation failed: {e}")
+                    for t in active:
+                        t.active = False
+                    results = []
+
+                action_jobs: list[tuple[_Traj, str]] = []
+                for t, r in zip(active, results):
+                    action = self._consume_result(t, r)
+                    if action is not None:
+                        action_jobs.append((t, action))
+                for t in active[len(results):]:
+                    t.active = False
+
+                if action_jobs:
+                    cmd_futs = {
+                        pool.submit(t.sandbox.execute, action): t
+                        for t, action in action_jobs
+                    }
+                    for fut in as_completed(cmd_futs):
+                        t = cmd_futs[fut]
+                        try:
+                            sr = fut.result()
+                        except Exception as e:
+                            sr = SandboxResult(
+                                stdout="", stderr=f"Execution error: {e}", exit_code=-1,
+                            )
+                        if sr.exit_code == 0:
+                            t.stats["successful_actions"] += 1
+                        t.messages.append({
+                            "role": "user",
+                            "content": (
+                                f"[Observation]\n{format_observation(sr)}\n\n"
+                                "Continue fixing the issue."
+                            ),
+                        })
+
+                active = [
+                    t for t in active
+                    if t.active and t.stats["total_turns"] < max_turns
+                ]
+        finally:
+            pool.shutdown(wait=True)
+
+        rollouts: list[RolloutResult | None] = [None] * len(queue)
+        rewards: list[float] = [0.0] * len(queue)
+        with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+            futures = {
+                executor.submit(self._finalize_traj, t, tokenizer): i
+                for i, t in enumerate(queue)
+            }
+            for fut in as_completed(futures):
+                i = futures[fut]
+                try:
+                    rollouts[i], rewards[i] = fut.result()
+                except Exception as e:
+                    logger.warning(
+                        f"Trajectory failed for {queue[i].task.instance_id}: {e}"
+                    )
+                    rollouts[i] = self._make_empty_rollout(queue[i].task, tokenizer)
+                    rewards[i] = 0.0
 
         return rollouts, rewards
 
-    def _run_single_trajectory(
-        self,
-        task: TaskInstance,
-        sandbox: DockerSandbox,
-        max_turns: int,
-        tokenizer,
-    ) -> tuple[RolloutResult, dict]:
-        """Run a single multi-turn trajectory.
-
-        Accumulates the exact rendered chat-token stream into a single
-        RolloutResult, with a response_mask that marks only model-generated
-        tokens.
-
-        Returns:
-            (rollout, trajectory_stats) where trajectory_stats contains
-            signals for dense reward shaping.
-        """
-        # Build initial prompt
-        messages = build_initial_prompt(task.problem_statement)
-
-        import ray
-
-        all_response_ids: list[int] = []
-        all_log_probs: list[float] = []
-        all_response_mask: list[float] = []
-        all_response_texts: list[str] = []
-        prompt_ids_tensor = None
-
-        # Track trajectory-level signals for dense reward
-        traj_stats = {
-            "total_turns": 0,
-            "valid_actions": 0,
-            "successful_actions": 0,
-            "files_modified": False,
-            "used_done": False,
-            "tokenizer_drift": False,
-        }
-
-        for turn in range(max_turns):
-            traj_stats["total_turns"] = turn + 1
-
-            if tokenizer and hasattr(tokenizer, "apply_chat_template"):
-                conversation = tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    enable_thinking=True,
-                )
-            else:
-                conversation = "\n".join(m["content"] for m in messages)
-
-            # Generate one turn
-            generation_results = ray.get(
-                self.rollout_engine.generate.remote(
-                    [conversation],
-                    n_samples=1,
-                    max_new_tokens=self.config.rollout.max_new_tokens,
-                    temperature=self.config.rollout.temperature,
-                )
+    def _render(self, messages: list[dict[str, str]], tokenizer) -> str:
+        if tokenizer and hasattr(tokenizer, "apply_chat_template"):
+            return tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=True,
             )
+        return "\n".join(m["content"] for m in messages)
 
-            if not generation_results:
-                break
-
-            result = generation_results[0]
-            if prompt_ids_tensor is None:
-                prompt_ids_tensor = result.prompt_ids
-            else:
-                appended = _append_prompt_delta(
-                    response_ids=all_response_ids,
-                    old_log_probs=all_log_probs,
-                    response_mask=all_response_mask,
-                    new_prompt_ids=result.prompt_ids.tolist(),
-                    initial_prompt_ids=prompt_ids_tensor.tolist(),
+    def _consume_result(self, t: _Traj, result: RolloutResult) -> str | None:
+        """Apply one generation result to ``t``; return next bash action or None."""
+        if t.prompt_ids is None:
+            t.prompt_ids = result.prompt_ids
+        else:
+            ok = _append_prompt_delta(
+                response_ids=t.response_ids,
+                old_log_probs=t.log_probs,
+                response_mask=t.response_mask,
+                new_prompt_ids=result.prompt_ids.tolist(),
+                initial_prompt_ids=t.prompt_ids.tolist(),
+            )
+            if not ok:
+                logger.warning(
+                    f"Chat-template re-tokenization drift for {t.task.instance_id}; "
+                    "ending trajectory early."
                 )
-                if not appended:
-                    logger.warning(
-                        f"Chat-template re-tokenization drift for {task.instance_id} "
-                        f"at turn {turn + 1}; ending trajectory early."
-                    )
-                    traj_stats["tokenizer_drift"] = True
-                    break
+                t.stats["tokenizer_drift"] = True
+                t.active = False
+                return None
 
-            # Accumulate response tokens and log probs
-            generated_ids = result.response_ids.tolist()
-            all_response_ids.extend(generated_ids)
-            all_log_probs.extend(result.old_log_probs.tolist())
-            all_response_mask.extend([1.0] * len(generated_ids))
+        generated = result.response_ids.tolist()
+        t.response_ids.extend(generated)
+        t.log_probs.extend(result.old_log_probs.tolist())
+        t.response_mask.extend([1.0] * len(generated))
+        t.response_texts.append(result.response_text)
+        t.messages.append({"role": "assistant", "content": result.response_text})
 
-            # Add model response to message history
-            all_response_texts.append(result.response_text)
-            messages.append({"role": "assistant", "content": result.response_text})
+        action_type, action_content = parse_action(result.response_text)
+        if action_type == ACTION_DONE:
+            t.stats["used_done"] = True
+            t.active = False
+            return None
+        if not action_content.strip():
+            t.active = False
+            return None
+        t.stats["valid_actions"] += 1
+        return action_content
 
-            # Parse action and execute
-            action_type, action_content = parse_action(result.response_text)
+    def _finalize_traj(self, t: _Traj, tokenizer) -> tuple[RolloutResult, float]:
+        reward = 0.0
+        try:
+            if t.sandbox is not None:
+                diff = t.sandbox.execute("cd /testbed && git diff --name-only")
+                if diff.exit_code == 0 and diff.stdout.strip():
+                    t.stats["files_modified"] = True
+                reward, _ = compute_swe_reward(t.sandbox, t.task, t.stats)
+        finally:
+            self.sandbox_pool.release_sandbox(t.pool_key)
 
-            if action_type == ACTION_DONE:
-                traj_stats["used_done"] = True
-                break
+        if t.prompt_ids is None:
+            return self._make_empty_rollout(t.task, tokenizer), reward
 
-            if not action_content.strip():
-                # Model emitted no executable content; stop the trajectory.
-                break
-
-            traj_stats["valid_actions"] += 1
-            sandbox_result = sandbox.execute(action_content)
-            if sandbox_result.exit_code == 0:
-                traj_stats["successful_actions"] += 1
-
-            observation = format_observation(sandbox_result)
-            obs_content = f"[Observation]\n{observation}\n\nContinue fixing the issue."
-
-            # Add observation as a new user turn to maintain proper chat format
-            messages.append({"role": "user", "content": obs_content})
-
-        # Check if the model modified any source files
-        diff_result = sandbox.execute("cd /testbed && git diff --name-only")
-        if diff_result.exit_code == 0 and diff_result.stdout.strip():
-            traj_stats["files_modified"] = True
-
-        # Assemble final RolloutResult
-        if prompt_ids_tensor is None:
-            return self._make_empty_rollout(task, tokenizer), traj_stats
-
-        response_ids = torch.tensor(all_response_ids, dtype=torch.long)
-        old_log_probs = torch.tensor(all_log_probs, dtype=torch.float32)
-        response_mask = torch.tensor(all_response_mask, dtype=torch.float32)
-        full_ids = torch.cat([prompt_ids_tensor, response_ids])
-
+        response_ids = torch.tensor(t.response_ids, dtype=torch.long)
         return RolloutResult(
-            prompt_ids=prompt_ids_tensor,
+            prompt_ids=t.prompt_ids,
             response_ids=response_ids,
-            full_ids=full_ids,
-            old_log_probs=old_log_probs,
-            response_text="\n".join(all_response_texts),
-            prompt_text=task.problem_statement,
-            prompt_len=len(prompt_ids_tensor),
+            full_ids=torch.cat([t.prompt_ids, response_ids]),
+            old_log_probs=torch.tensor(t.log_probs, dtype=torch.float32),
+            response_text="\n".join(t.response_texts),
+            prompt_text=t.task.problem_statement,
+            prompt_len=len(t.prompt_ids),
             response_len=len(response_ids),
-            response_mask=response_mask,
-        ), traj_stats
+            response_mask=torch.tensor(t.response_mask, dtype=torch.float32),
+        ), reward
 
     def _make_empty_rollout(self, task: TaskInstance, tokenizer) -> RolloutResult:
         """Create an empty rollout for failed trajectories."""

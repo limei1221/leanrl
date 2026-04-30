@@ -1,5 +1,6 @@
 """Tests for SWE multi-turn action parsing and token masking."""
 
+import sys
 from types import SimpleNamespace
 
 import torch
@@ -9,9 +10,11 @@ from leanrl.agent.multi_turn import (
     ACTION_BASH,
     ACTION_DONE,
     _append_prompt_delta,
+    _pool_task,
     MultiTurnExecutor,
 )
 from leanrl.experience import RolloutResult
+from leanrl.agent.sandbox import SandboxResult, TaskInstance
 
 
 class TestParseActionBashTag:
@@ -213,6 +216,7 @@ class _ToyChatTokenizer:
         messages: list[dict[str, str]],
         tokenize: bool,
         add_generation_prompt: bool,
+        **kwargs,
     ) -> list[int] | str:
         tokens: list[int] = []
         text_parts: list[str] = []
@@ -289,6 +293,88 @@ class TestPromptDeltaChatTokenizer:
         assert old_log_probs[-delta_len:] == [0.0] * delta_len
         # Full accumulated stream equals the re-rendered turn-1 prompt.
         assert initial_prompt + response_ids == prompt_t1
+
+
+class TestBatchedMultiTurnRollout:
+    def test_pool_task_uses_unique_pool_key_and_original_image(self):
+        task = TaskInstance(
+            instance_id="django__django-12345",
+            repo="django/django",
+            base_commit="abc123",
+            test_patch="",
+            fail_to_pass=[],
+            pass_to_pass=[],
+            problem_statement="Fix it",
+        )
+
+        sb_task = _pool_task(task, "django__django-12345__sample_1_9")
+
+        assert sb_task.instance_id == "django__django-12345__sample_1_9"
+        assert sb_task.docker_image == "sweb.eval.x86_64.django__django-12345:latest"
+        assert sb_task.problem_statement == task.problem_statement
+
+    def test_batched_rollout_calls_vllm_once_with_all_active_prompts(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(get=lambda value: value))
+
+        class DummyGenerate:
+            def __init__(self):
+                self.batch_sizes = []
+
+            def remote(self, prompts, n_samples, max_new_tokens, temperature):
+                self.batch_sizes.append(len(prompts))
+                return [
+                    RolloutResult(
+                        prompt_ids=torch.tensor([100 + i]),
+                        response_ids=torch.tensor([200 + i]),
+                        full_ids=torch.tensor([100 + i, 200 + i]),
+                        old_log_probs=torch.tensor([-0.1 * (i + 1)]),
+                        response_text="<done/>",
+                        prompt_text=prompt,
+                        prompt_len=1,
+                        response_len=1,
+                    )
+                    for i, prompt in enumerate(prompts)
+                ]
+
+        class DummySandbox:
+            def execute(self, cmd):
+                return SandboxResult(stdout="", stderr="", exit_code=0)
+
+        generate = DummyGenerate()
+        executor = MultiTurnExecutor.__new__(MultiTurnExecutor)
+        executor.rollout_engine = SimpleNamespace(generate=generate)
+        executor.sandbox_pool = SimpleNamespace(
+            get_sandbox=lambda task: DummySandbox(),
+            release_sandbox=lambda _id: None,
+        )
+        executor.config = SimpleNamespace(
+            swe=SimpleNamespace(max_turns=1, max_concurrent_sandboxes=8),
+            rollout=SimpleNamespace(max_new_tokens=8, temperature=0.7),
+        )
+
+        monkeypatch.setattr(
+            "leanrl.agent.multi_turn.compute_swe_reward",
+            lambda sandbox, task, stats: (1.0, {}),
+        )
+
+        tasks = [
+            TaskInstance(
+                instance_id=f"repo-{i}",
+                repo="repo",
+                base_commit="abc123",
+                test_patch="",
+                fail_to_pass=[],
+                pass_to_pass=[],
+                problem_statement=f"Fix it {i}",
+            )
+            for i in range(3)
+        ]
+
+        rollouts, rewards = executor._run_batched_rollouts(tasks, n_samples=1, tokenizer=None)
+
+        assert generate.batch_sizes == [3]
+        assert len(rollouts) == 3
+        assert rewards == [1.0, 1.0, 1.0]
 
 
 class TestPolicyLogprobRefresh:
