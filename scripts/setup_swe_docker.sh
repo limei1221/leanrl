@@ -12,28 +12,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Detect container runtime: prefer docker, fall back to podman
-if docker info &>/dev/null; then
-    CONTAINER_RT=docker
-elif podman info &>/dev/null; then
-    CONTAINER_RT=podman
-    # Expose Podman via Docker-compatible socket so the Python docker SDK works
-    if [ -z "${DOCKER_HOST:-}" ]; then
-        podman system service --time=0 "unix:///tmp/podman.sock" &
-        export DOCKER_HOST="unix:///tmp/podman.sock"
-        sleep 1
-    fi
-else
-    echo "ERROR: Neither Docker nor Podman is available."
+if ! docker info &>/dev/null; then
+    echo "ERROR: Docker is not available."
     exit 1
 fi
 
-echo "=== SWE-bench Docker Image Setup (runtime: $CONTAINER_RT) ==="
+echo "=== SWE-bench Docker Image Setup ==="
 
 pip install -q swebench 2>/dev/null || true
 
 SPLIT="${1:-test}"
-MAX_WORKERS="${SWE_MAX_WORKERS:-4}"
+MAX_WORKERS="${SWE_MAX_WORKERS:-$(( $(nproc) < 24 ? $(nproc) : 24 ))}"
 MAX_SAMPLES="${MAX_SAMPLES:-0}"
 RETRY_COUNT="${RETRY_COUNT:-2}"
 
@@ -58,5 +47,5 @@ python3 "$SCRIPT_DIR/setup_swe_docker.py" \
 
 echo ""
 echo "=== Setup complete ==="
-total=$($CONTAINER_RT images --filter "reference=sweb.eval.x86_64.*" --format "{{.Repository}}" | wc -l)
+total=$(docker images --filter "reference=sweb.eval.x86_64.*" --format "{{.Repository}}" | wc -l)
 echo "Instance images built: $total"

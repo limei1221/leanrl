@@ -14,20 +14,22 @@ Key technologies: Ray (distributed rollouts), vLLM (fast inference), DeepSpeed (
 
 ### Install
 ```bash
+# Use Python 3.12 — the pinned flash-attn wheel is cp312-only.
+conda create -n leanrl python=3.12 -y && conda activate leanrl
 pip install -e ".[dev]"
+
 # DeepSpeed MPI requirement:
 apt-get install -y libopenmpi-dev openmpi-bin
-# If CUDA tooling is missing:
-apt-get install -y nvidia-cuda-toolkit
+
+# If CUDA tooling is missing (Ubuntu's apt nvidia-cuda-toolkit is CUDA 11.5,
+# wrong major for torch cu12 — use conda instead so it scopes to the env):
+conda install -n leanrl -c nvidia cuda-toolkit=12.8
+export CUDA_HOME=$CONDA_PREFIX
 ```
 
-**flash-attn note**: prebuilt wheels on the Dao-AILab releases page are pinned to specific torch minor versions (e.g. v2.8.3 → torch 2.8). With a newer torch (e.g. 2.10) you get an `undefined symbol` on import and must source-build. On a cgroup-limited container (e.g. RunPod ~465 GB memory cap) use `MAX_JOBS=8` to avoid OOM during the backward-hdim CUDA kernels:
-```bash
-MAX_JOBS=8 TORCH_CUDA_ARCH_LIST="8.0" FLASH_ATTENTION_FORCE_BUILD=TRUE \
-  CUDA_HOME=/usr/local/cuda \
-  pip install -v --no-build-isolation flash-attn==2.8.3
-```
-Restrict `TORCH_CUDA_ARCH_LIST` to just the target arch (e.g. `"8.0"` for A100) to cut build time.
+**Version pins that matter**:
+- `torch==2.8.0` and `flash-attn 2.8.3` (cp312/cu12 prebuilt wheel) are coupled — both need to move together. With a different torch minor, the wheel marker stops matching and you must source-build (`MAX_JOBS=8 TORCH_CUDA_ARCH_LIST="<arch>" FLASH_ATTENTION_FORCE_BUILD=TRUE pip install -v --no-build-isolation flash-attn==2.8.3`; restrict `TORCH_CUDA_ARCH_LIST` to the target arch — `"8.0"` A100, `"8.9"` RTX 4090 — to cut build time, and lower `MAX_JOBS` on cgroup-limited containers to avoid backward-hdim OOM).
+- `transformers>=4.55.2,<5.0`: vLLM 0.11.0 was built against transformers 4.x. transformers 5.0 tightened tokenizer `__getattr__` and breaks `Qwen2Tokenizer.all_special_tokens_extended`, which vLLM accesses on every rollout — symptom is `AttributeError: Qwen2Tokenizer has no attribute all_special_tokens_extended` from the `RolloutEngine` actor.
 
 ### Lint & Format
 ```bash

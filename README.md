@@ -18,22 +18,19 @@ Supported tasks:
 
 ```bash
 # Install
+conda create -n leanrl python=3.12 -y && conda activate leanrl
 pip install -e ".[dev]"
 
 # System dependencies required by DeepSpeed:
 apt-get update && apt-get install -y libopenmpi-dev openmpi-bin
+
 # If CUDA tooling is missing:
-apt-get install -y nvidia-cuda-toolkit
+conda install -n leanrl -c nvidia cuda-toolkit=12.8
 ```
 
 Training requires a 2-GPU setup: GPU 0 for the policy and reference models (DeepSpeed), GPU 1 for the vLLM rollout engine (Ray).
 
-SWE-bench training requires a container runtime. Docker or [Podman](https://podman.io/) (rootless, useful when Docker is unavailable, e.g. vast.ai) both work — the scripts auto-detect which is available.
-
-```bash
-# If Docker is not available, install Podman instead:
-apt-get install -y podman
-```
+SWE-bench training requires Docker for sandboxed test execution.
 
 ```bash
 # Math (GSM8K/train)
@@ -100,9 +97,9 @@ python scripts/eval_swe_oracle.py --num_samples 16  # golden-patch baseline on 1
 
 ## Experiments
 
-Hardware: 2× A100 (80 GB each), ~465 GB RAM cgroup limit, 27.2 vCPUs, 30 GB root overlay (/workspace has 71 TB free). Python 3.12.3, PyTorch 2.10.0+cu128.
-
 ### Math
+
+Hardware: 2× A100 (80 GB each), ~465 GiB RAM, 27.2 vCPUs, 500 GB disk. Python 3.12.3, PyTorch 2.8.0+cu128.
 
 |  | Model | Accuracy |
 |------------|-------|----------|
@@ -112,6 +109,9 @@ Hardware: 2× A100 (80 GB each), ~465 GB RAM cgroup limit, 27.2 vCPUs, 30 GB roo
 | ref2 | Qwen/Qwen2.5-Math-7B-Instruct | 95.3%  (1257/1319) |
 
 ### Coding
+
+Hardware: 2× RTX 4090 (48 GB each), ~198 GiB RAM, 61 CPUs, 500 GB disk. Python 3.12.13, PyTorch 2.8.0+cu128.
+
 max_turns=10, max_new_tokens=512
 
 |  | Model | Resolve Rate |
