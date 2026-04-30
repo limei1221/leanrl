@@ -97,3 +97,29 @@ class TestBuildExperience:
         )
         # All 6 tokens should be unmasked (the EOS is a real token, not padding)
         assert exp.attention_mask.sum().item() == 6
+
+    def test_tail_truncation_keeps_ref_logprobs_aligned(self):
+        r = RolloutResult(
+            prompt_ids=torch.tensor([10, 11]),
+            response_ids=torch.tensor([12, 13, 14, 15]),
+            full_ids=torch.tensor([10, 11, 12, 13, 14, 15]),
+            old_log_probs=torch.tensor([0.1, 0.2, 0.3, 0.4]),
+            response_text="test",
+            prompt_text="test",
+            prompt_len=2,
+            response_len=4,
+            response_mask=torch.tensor([1.0, 0.0, 1.0, 1.0]),
+        )
+
+        exp = build_experience_from_rollouts(
+            [r],
+            rewards=torch.tensor([1.0]),
+            advantages=torch.tensor([0.0]),
+            ref_log_probs_list=[torch.tensor([1.0, 2.0, 3.0, 4.0])],
+            max_seq_len=4,
+        )
+
+        assert exp.response_ids.tolist() == [[14, 15]]
+        assert torch.allclose(exp.old_log_probs, torch.tensor([[0.3, 0.4]]))
+        assert torch.allclose(exp.ref_log_probs, torch.tensor([[3.0, 4.0]]))
+        assert exp.response_mask.tolist() == [[1.0, 1.0]]

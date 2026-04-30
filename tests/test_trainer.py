@@ -8,9 +8,7 @@ from leanrl.trainer import GRPOTrainer
 
 class _DummyExecutor:
     def __init__(self, reward_batches):
-        self.reward_batches = [
-            torch.tensor(batch, dtype=torch.float32) for batch in reward_batches
-        ]
+        self.reward_batches = [torch.tensor(batch, dtype=torch.float32) for batch in reward_batches]
         self.calls = 0
 
     def execute(self, prompts, labels, tokenizer=None):
@@ -22,10 +20,7 @@ class _DummyExecutor:
 def _make_trainer(task: str, reward_batches: list[list[float]]) -> GRPOTrainer:
     trainer = GRPOTrainer.__new__(GRPOTrainer)
     trainer.config = SimpleNamespace(task=task)
-    trainer.eval_loader = [
-        {"prompts": ["prompt"], "labels": ["label"]}
-        for _ in reward_batches
-    ]
+    trainer.eval_loader = [{"prompts": ["prompt"], "labels": ["label"]} for _ in reward_batches]
     trainer.executor = _DummyExecutor(reward_batches)
     trainer.tokenizer = None
     return trainer

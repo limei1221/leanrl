@@ -149,6 +149,43 @@ class PolicyModel:
             config=ds_config,
         )
 
+    @property
+    def device(self) -> torch.device:
+        return next(self.engine.module.parameters()).device
+
+    @torch.no_grad()
+    def forward_logprobs_no_grad(
+        self,
+        input_ids: Tensor,
+        attention_mask: Tensor,
+        response_lengths: Tensor,
+        max_resp_len: int,
+    ) -> Tensor:
+        """Compute per-token response log-probs without building a graph.
+
+        Used to refresh ``old_log_probs`` on the truncated context just before
+        the PPO loop so that importance ratios are well-defined when sequences
+        are head-truncated and to remove any vLLM/HF numerical drift.
+        """
+        device = self.device
+        input_ids = input_ids.to(device)
+        attention_mask = attention_mask.to(device)
+        response_lengths = response_lengths.to(device)
+        outputs = self.engine(input_ids=input_ids, attention_mask=attention_mask)
+        logits = outputs.logits
+        shift_logits = logits[:, :-1, :]
+        shift_labels = input_ids[:, 1:]
+        log_probs = F.log_softmax(shift_logits, dim=-1)
+        per_token_lp = log_probs.gather(
+            dim=-1, index=shift_labels.unsqueeze(-1),
+        ).squeeze(-1)
+        return _extract_response_logprobs(
+            per_token_lp=per_token_lp,
+            attention_mask=attention_mask,
+            response_lengths=response_lengths,
+            max_resp_len=max_resp_len,
+        )
+
     def forward_logprobs_from_experience(
         self,
         input_ids: Tensor,

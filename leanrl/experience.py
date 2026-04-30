@@ -85,22 +85,27 @@ def pad_sequences(sequences: list[Tensor], pad_value: int = 0, pad_side: str = "
 
 
 def truncate_rollout(r: RolloutResult, max_seq_len: int) -> RolloutResult:
-    """Truncate a rollout's response to fit within max_seq_len (prompt + response)."""
+    """Truncate a rollout's response to fit within max_seq_len (prompt + response).
+
+    Keeps the most recent response tokens (drops the head) so that terminal
+    content like the final answer is preserved.
+    """
     max_resp = max_seq_len - r.prompt_len
     if max_resp <= 0:
         max_resp = 1  # keep at least 1 response token
     if r.response_len <= max_resp:
         return r
+    response_ids = r.response_ids[-max_resp:]
     return RolloutResult(
         prompt_ids=r.prompt_ids,
-        response_ids=r.response_ids[:max_resp],
-        full_ids=r.full_ids[:r.prompt_len + max_resp],
-        old_log_probs=r.old_log_probs[:max_resp],
+        response_ids=response_ids,
+        full_ids=torch.cat([r.prompt_ids, response_ids]),
+        old_log_probs=r.old_log_probs[-max_resp:],
         response_text=r.response_text,
         prompt_text=r.prompt_text,
         prompt_len=r.prompt_len,
         response_len=max_resp,
-        response_mask=r.response_mask[:max_resp] if r.response_mask is not None else None,
+        response_mask=r.response_mask[-max_resp:] if r.response_mask is not None else None,
     )
 
 
@@ -128,7 +133,7 @@ def build_experience_from_rollouts(
     if max_seq_len > 0:
         rollouts = [truncate_rollout(r, max_seq_len) for r in rollouts]
         ref_log_probs_list = [
-            lp[:r.response_len] for r, lp in zip(rollouts, ref_log_probs_list)
+            lp[-r.response_len:] for r, lp in zip(rollouts, ref_log_probs_list)
         ]
 
     prompt_ids = pad_sequences([r.prompt_ids for r in rollouts], pad_value=pad_token_id)

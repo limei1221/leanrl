@@ -70,9 +70,11 @@ class _DummyDataset(list):
 
 
 def test_main_uses_training_aligned_swe_defaults(monkeypatch):
-    dataset = _DummyDataset([
-        {"instance_id": "repo-1", "problem_statement": "Fix the bug"},
-    ])
+    dataset = _DummyDataset(
+        [
+            {"instance_id": "repo-1", "problem_statement": "Fix the bug"},
+        ]
+    )
     called = {}
 
     monkeypatch.setattr(
@@ -92,5 +94,84 @@ def test_main_uses_training_aligned_swe_defaults(monkeypatch):
     eval_swe.main()
 
     assert called["model_path"] == "stub-model"
-    assert called["max_turns"] == 15
-    assert called["max_new_tokens"] == 1024
+    assert called["max_turns"] == 10
+    assert called["max_new_tokens"] == 2048
+    assert called["enable_thinking"] is True
+
+
+def test_main_allows_disabling_thinking(monkeypatch):
+    dataset = _DummyDataset(
+        [
+            {"instance_id": "repo-1", "problem_statement": "Fix the bug"},
+        ]
+    )
+    called = {}
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "eval_swe.py",
+            "--model_name_or_path",
+            "stub-model",
+            "--enable_thinking",
+            "False",
+            "--output_json",
+            "",
+        ],
+    )
+    monkeypatch.setattr(eval_swe, "load_dataset", lambda dataset_name, split: dataset)
+    monkeypatch.setattr(eval_swe, "build_task", lambda row: row)
+
+    def fake_evaluate(**kwargs):
+        called.update(kwargs)
+        return 0.0, [{"resolved": False}]
+
+    monkeypatch.setattr(eval_swe, "evaluate", fake_evaluate)
+
+    eval_swe.main()
+
+    assert called["enable_thinking"] is False
+
+
+def test_main_writes_passed_counts_with_totals(monkeypatch, tmp_path):
+    output_json = tmp_path / "results.json"
+    dataset = _DummyDataset(
+        [
+            {"instance_id": "repo-1", "problem_statement": "Fix the bug"},
+        ]
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "eval_swe.py",
+            "--model_name_or_path",
+            "stub-model",
+            "--output_json",
+            str(output_json),
+        ],
+    )
+    monkeypatch.setattr(eval_swe, "load_dataset", lambda dataset_name, split: dataset)
+    monkeypatch.setattr(eval_swe, "build_task", lambda row: row)
+
+    def fake_evaluate(**kwargs):
+        return 0.0, [
+            {
+                "fail_to_pass_total": 1,
+                "pass_to_pass_total": 16,
+                "fail_to_pass_passed": 0,
+                "pass_to_pass_passed": 15,
+                "resolved": False,
+            }
+        ]
+
+    monkeypatch.setattr(eval_swe, "evaluate", fake_evaluate)
+
+    eval_swe.main()
+
+    data = json.loads(output_json.read_text())
+    result = data["results"][0]
+    assert result["fail_to_pass_passed"] == "0 / 1"
+    assert result["pass_to_pass_passed"] == "15 / 16"

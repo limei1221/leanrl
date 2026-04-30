@@ -152,9 +152,11 @@ class MultiTurnExecutor:
         rollout_engine,
         ref_model,
         config: TrainConfig,
+        policy_model=None,
     ):
         self.rollout_engine = rollout_engine
         self.ref_model = ref_model
+        self.policy_model = policy_model
         self.config = config
         self.sandbox_pool = SandboxPool(
             max_concurrent=config.swe.max_concurrent_sandboxes,
@@ -211,6 +213,7 @@ class MultiTurnExecutor:
             from leanrl.experience import truncate_rollout
             all_rollouts = [truncate_rollout(r, max_seq_len) for r in all_rollouts]
 
+        self._refresh_old_logprobs(all_rollouts, tokenizer)
         ref_log_probs_list = self._compute_ref_logprobs(all_rollouts, tokenizer)
 
         experience = self._build_experience(
@@ -338,7 +341,7 @@ class MultiTurnExecutor:
                     messages,
                     tokenize=False,
                     add_generation_prompt=True,
-                    enable_thinking=False,
+                    enable_thinking=True,
                 )
             else:
                 conversation = "\n".join(m["content"] for m in messages)
@@ -458,6 +461,46 @@ class MultiTurnExecutor:
             response_len=1,
             response_mask=torch.ones(1, dtype=torch.float32),
         )
+
+    def _refresh_old_logprobs(self, rollouts: list[RolloutResult], tokenizer) -> None:
+        """Recompute old log-probs with the policy over the training context."""
+        if self.policy_model is None:
+            return
+
+        pad_id = tokenizer.pad_token_id if tokenizer and tokenizer.pad_token_id is not None else 0
+        mini_bs = self.config.training.micro_batch_size
+
+        for start in range(0, len(rollouts), mini_bs):
+            chunk = rollouts[start : start + mini_bs]
+
+            input_ids = pad_sequences(
+                [r.full_ids for r in chunk],
+                pad_value=pad_id,
+            )
+
+            response_lengths = torch.tensor(
+                [r.response_len for r in chunk],
+                dtype=torch.long,
+            )
+            seq_lengths = torch.tensor(
+                [r.prompt_len + r.response_len for r in chunk],
+                dtype=torch.long,
+            )
+            attention_mask = torch.zeros(input_ids.shape, dtype=torch.long)
+            for i, sl in enumerate(seq_lengths):
+                attention_mask[i, :sl] = 1
+
+            max_resp_len = max(r.response_len for r in chunk)
+
+            new_lp = self.policy_model.forward_logprobs_no_grad(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                response_lengths=response_lengths,
+                max_resp_len=max_resp_len,
+            )
+
+            for j, r in enumerate(chunk):
+                r.old_log_probs = new_lp[j, : r.response_len].detach().cpu()
 
     def _compute_ref_logprobs(self, rollouts: list[RolloutResult], tokenizer) -> list[Tensor]:
         """Compute reference model log-probs for each rollout, in mini-batches

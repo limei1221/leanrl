@@ -1,12 +1,17 @@
 """Tests for SWE multi-turn action parsing and token masking."""
 
-import pytest
+from types import SimpleNamespace
+
+import torch
+
 from leanrl.agent.multi_turn import (
     parse_action,
     ACTION_BASH,
     ACTION_DONE,
     _append_prompt_delta,
+    MultiTurnExecutor,
 )
+from leanrl.experience import RolloutResult
 
 
 class TestParseActionBashTag:
@@ -59,7 +64,7 @@ class TestEditActionsRemoved:
         assert action == ACTION_DONE
 
     def test_python_fence_not_converted(self):
-        text = '```python\nimport os\nprint(os.getcwd())\n```'
+        text = "```python\nimport os\nprint(os.getcwd())\n```"
         action, _ = parse_action(text)
         # Without a bash/sh fence, this is not recognized — falls through to done
         assert action == ACTION_DONE
@@ -79,6 +84,7 @@ class TestEditActionsRemoved:
 class TestActionConstantRemoved:
     def test_no_action_edit_constant(self):
         import leanrl.agent.multi_turn as mod
+
         assert not hasattr(mod, "ACTION_EDIT")
 
 
@@ -189,29 +195,65 @@ class TestPromptDeltaMasking:
         assert old_log_probs == [-0.1, -0.2, 0.0, 0.0, -0.3, 0.0, 0.0]
 
 
-class TestPromptDeltaRealTokenizer:
-    """Round-trip smoke test with a real Qwen chat template + tokenizer.
+class _ToyChatTokenizer:
+    """Small deterministic tokenizer for chat-template round-trip tests."""
+
+    eos_token_id = 0
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        return [ord(c) + 1 for c in text]
+
+    def decode(self, ids: list[int], skip_special_tokens: bool = False) -> str:
+        if skip_special_tokens:
+            ids = [i for i in ids if i != self.eos_token_id]
+        return "".join(chr(i - 1) for i in ids)
+
+    def apply_chat_template(
+        self,
+        messages: list[dict[str, str]],
+        tokenize: bool,
+        add_generation_prompt: bool,
+    ) -> list[int] | str:
+        tokens: list[int] = []
+        text_parts: list[str] = []
+        for msg in messages:
+            header = f"<|{msg['role']}|>\n"
+            text_parts.extend([header, msg["content"]])
+            tokens.extend(self.encode(header))
+            tokens.extend(self.encode(msg["content"]))
+            if msg["role"] == "assistant":
+                tokens.append(self.eos_token_id)
+                text_parts.append("<|eos|>")
+            text_parts.append("\n")
+            tokens.extend(self.encode("\n"))
+
+        if add_generation_prompt:
+            generation_prompt = "<|assistant|>\n"
+            tokens.extend(self.encode(generation_prompt))
+            text_parts.append(generation_prompt)
+
+        if tokenize:
+            return tokens
+        return "".join(text_parts)
+
+
+class TestPromptDeltaChatTokenizer:
+    """Round-trip smoke test with a chat-template tokenizer.
 
     Exercises the path that breaks in production: decode(gen_ids) placed back
     into apply_chat_template should retokenize to the original gen_ids.
     """
 
     def test_clean_round_trip_across_turns(self):
-        pytest.importorskip("transformers")
-        from transformers import AutoTokenizer
-
-        try:
-            tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
-        except Exception as e:
-            pytest.skip(f"Qwen tokenizer unavailable: {e}")
+        tok = _ToyChatTokenizer()
 
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Fix the bug in foo.py."},
         ]
-        initial_prompt = list(tok.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=True
-        ))
+        initial_prompt = list(
+            tok.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
+        )
 
         gen_text_0 = "Let me check the code.\n<bash>ls /testbed</bash>"
         gen_ids_0 = tok.encode(gen_text_0, add_special_tokens=False) + [tok.eos_token_id]
@@ -225,9 +267,9 @@ class TestPromptDeltaRealTokenizer:
             {"role": "assistant", "content": gen_text_0_decoded},
             {"role": "user", "content": "[Observation]\nfile1.py\nfile2.py\n\nContinue."},
         ]
-        prompt_t1 = list(tok.apply_chat_template(
-            messages_t1, tokenize=True, add_generation_prompt=True
-        ))
+        prompt_t1 = list(
+            tok.apply_chat_template(messages_t1, tokenize=True, add_generation_prompt=True)
+        )
 
         ok = _append_prompt_delta(
             response_ids=response_ids,
@@ -238,7 +280,7 @@ class TestPromptDeltaRealTokenizer:
         )
 
         assert ok, (
-            "Plain-ASCII assistant content should round-trip through the Qwen "
+            "Plain-ASCII assistant content should round-trip through the chat "
             "tokenizer; drift here indicates a real regression."
         )
         delta_len = len(response_ids) - len(gen_ids_0)
@@ -247,3 +289,77 @@ class TestPromptDeltaRealTokenizer:
         assert old_log_probs[-delta_len:] == [0.0] * delta_len
         # Full accumulated stream equals the re-rendered turn-1 prompt.
         assert initial_prompt + response_ids == prompt_t1
+
+
+class TestPolicyLogprobRefresh:
+    def test_refresh_old_logprobs_uses_policy_model(self):
+        class DummyPolicy:
+            def __init__(self):
+                self.calls = []
+
+            def forward_logprobs_no_grad(
+                self,
+                input_ids,
+                attention_mask,
+                response_lengths,
+                max_resp_len,
+            ):
+                self.calls.append(
+                    {
+                        "input_ids": input_ids.clone(),
+                        "attention_mask": attention_mask.clone(),
+                        "response_lengths": response_lengths.clone(),
+                        "max_resp_len": max_resp_len,
+                    }
+                )
+                return torch.tensor(
+                    [[-1.0, -2.0], [-3.0, -4.0]],
+                    dtype=torch.float32,
+                )
+
+        policy = DummyPolicy()
+        executor = MultiTurnExecutor.__new__(MultiTurnExecutor)
+        executor.policy_model = policy
+        executor.config = SimpleNamespace(training=SimpleNamespace(micro_batch_size=2))
+
+        rollouts = [
+            RolloutResult(
+                prompt_ids=torch.tensor([10, 11]),
+                response_ids=torch.tensor([12, 13]),
+                full_ids=torch.tensor([10, 11, 12, 13]),
+                old_log_probs=torch.zeros(2),
+                response_text="a",
+                prompt_text="p1",
+                prompt_len=2,
+                response_len=2,
+            ),
+            RolloutResult(
+                prompt_ids=torch.tensor([20]),
+                response_ids=torch.tensor([21]),
+                full_ids=torch.tensor([20, 21]),
+                old_log_probs=torch.zeros(1),
+                response_text="b",
+                prompt_text="p2",
+                prompt_len=1,
+                response_len=1,
+            ),
+        ]
+
+        executor._refresh_old_logprobs(
+            rollouts,
+            tokenizer=SimpleNamespace(pad_token_id=0),
+        )
+
+        assert len(policy.calls) == 1
+        assert policy.calls[0]["input_ids"].tolist() == [
+            [10, 11, 12, 13],
+            [20, 21, 0, 0],
+        ]
+        assert policy.calls[0]["attention_mask"].tolist() == [
+            [1, 1, 1, 1],
+            [1, 1, 0, 0],
+        ]
+        assert policy.calls[0]["response_lengths"].tolist() == [2, 1]
+        assert policy.calls[0]["max_resp_len"] == 2
+        assert rollouts[0].old_log_probs.tolist() == [-1.0, -2.0]
+        assert rollouts[1].old_log_probs.tolist() == [-3.0]

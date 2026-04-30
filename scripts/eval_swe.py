@@ -65,6 +65,7 @@ def run_trajectory(
     memory_limit: str,
     cpu_limit: float,
     model_lock: threading.Lock,
+    enable_thinking: bool,
     verbose: bool = False,
 ) -> tuple[float, dict]:
     """Run a single multi-turn trajectory for one SWE-bench task.
@@ -90,7 +91,7 @@ def run_trajectory(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
-                enable_thinking=False,
+                enable_thinking=enable_thinking,
             )
 
             # Serialize GPU inference: only one thread may call generate() at a time.
@@ -111,6 +112,7 @@ def run_trajectory(
                     )
 
             input_len = inputs["input_ids"].shape[1]
+            response_tokens = output_ids.shape[1] - input_len
             response_text = tokenizer.decode(
                 output_ids[0][input_len:], skip_special_tokens=True
             )
@@ -118,9 +120,17 @@ def run_trajectory(
             action_type, action_content = parse_action(response_text)
 
             if verbose:
+                response_preview = (
+                    response_text
+                    if len(response_text) <= 200
+                    else response_text[:50] + "..." + response_text[-150:]
+                )
                 print(f"\n[{task.instance_id}] Turn {turn+1}")
-                print(f"  Response ({len(response_text)} chars): {response_text[:200]!r}")
-                print(f"  Action: {action_type}, content ({len(action_content)} chars): {action_content[:150]!r}")
+                print(
+                    f"  Response ({response_tokens} tokens, {len(response_text)} chars): "
+                    f"{response_preview!r}"
+                )
+                print(f"  Action: {action_type}, content ({len(action_content)} chars): {action_content!r}")
 
             # Detect repetitive loops — if the model repeats the same action
             # 2+ times, nudge it to try something different.
@@ -192,6 +202,7 @@ def evaluate(
     memory_limit: str,
     cpu_limit: float,
     device: str,
+    enable_thinking: bool = True,
     verbose: bool = False,
 ) -> tuple[float, list[dict]]:
     print(f"\nLoading {model_path} ...")
@@ -218,6 +229,7 @@ def evaluate(
             max_turns, max_new_tokens, device,
             sandbox_timeout, test_timeout,
             memory_limit, cpu_limit, model_lock,
+            enable_thinking,
             verbose=verbose,
         )
 
@@ -278,10 +290,10 @@ def main() -> None:
                         help="Number of instances to evaluate (default: 16)")
     parser.add_argument("--random_seed", type=int, default=42,
                         help="Random seed for sampling instances (default: None = no shuffle)")
-    parser.add_argument("--max_turns", type=int, default=15,
-                        help="Max agent turns per instance (default: 15)")
-    parser.add_argument("--max_new_tokens", type=int, default=1024,
-                        help="Max tokens to generate per turn (default: 1024)")
+    parser.add_argument("--max_turns", type=int, default=10,
+                        help="Max agent turns per instance (default: 10)")
+    parser.add_argument("--max_new_tokens", type=int, default=2048,
+                        help="Max tokens to generate per turn (default: 2048)")
     parser.add_argument("--max_workers", type=int, default=8,
                         help="Parallel sandbox workers (default: 8)")
     parser.add_argument("--sandbox_timeout", type=int, default=120,
@@ -293,11 +305,20 @@ def main() -> None:
     parser.add_argument("--cpu_limit", type=float, default=2.0,
                         help="Docker CPU limit per sandbox (default: 2.0)")
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--output_json", type=str, default="eval_results.json",
-                        help="Optional path to write per-instance results as JSON")
+    parser.add_argument("--enable_thinking", choices=["True", "False"], default="True",
+                        help="Enable tokenizer chat-template thinking mode (default: True)")
+    parser.add_argument("--output_json", type=str, default=None,
+                        help="Path to write per-instance results as JSON "
+                             "(default: {model}_{max_turns}_{max_new_tokens}.json)")
     parser.add_argument("--verbose", action="store_true",
                         help="Print each turn's model output and action for debugging")
     args = parser.parse_args()
+    enable_thinking = args.enable_thinking == "True"
+
+    if args.output_json is None:
+        safe_model = args.model_name_or_path.replace("/", "_")
+        args.output_json = f"{safe_model}_{args.max_turns}t_{args.max_new_tokens}toks_{args.num_samples}_thinking{args.enable_thinking}.json"
+        print(f"No --output_json specified, results will be written to {args.output_json}")
 
     print(f"Loading {args.dataset} ({args.split}) ...")
     dataset = load_dataset(args.dataset, split=args.split)
@@ -323,6 +344,7 @@ def main() -> None:
         memory_limit=args.memory_limit,
         cpu_limit=args.cpu_limit,
         device=args.device,
+        enable_thinking=enable_thinking,
         verbose=args.verbose,
     )
 
@@ -337,6 +359,14 @@ def main() -> None:
         import json as _json
         resolved = int(resolved)
         total = int(len(tasks))
+        json_results = []
+        for r in results:
+            r = dict(r)
+            if "fail_to_pass_passed" in r and "fail_to_pass_total" in r:
+                r["fail_to_pass_passed"] = f"{r['fail_to_pass_passed']} / {r['fail_to_pass_total']}"
+            if "pass_to_pass_passed" in r and "pass_to_pass_total" in r:
+                r["pass_to_pass_passed"] = f"{r['pass_to_pass_passed']} / {r['pass_to_pass_total']}"
+            json_results.append(r)
         with open(args.output_json, "w") as f:
             _json.dump(
                 {
@@ -346,7 +376,7 @@ def main() -> None:
                     "resolve_rate": resolve_rate,
                     "resolved": resolved,
                     "total": total,
-                    "results": results,
+                    "results": json_results,
                 },
                 f,
                 indent=2,

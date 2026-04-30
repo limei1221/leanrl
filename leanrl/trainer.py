@@ -148,6 +148,7 @@ class GRPOTrainer:
                 rollout_engine=self.rollout_engine,
                 ref_model=self.ref_model,
                 config=cfg,
+                policy_model=self.policy,
             )
         else:
             raise ValueError(f"Unknown task: {cfg.task}")
@@ -281,10 +282,7 @@ class GRPOTrainer:
                     except Exception:
                         pass
 
-                if (
-                    self._should_sync_vllm_after_step()
-                    or self._needs_fresh_vllm_for_checkpoint()
-                ):
+                if self._should_sync_vllm_after_step() or self._needs_fresh_vllm_for_checkpoint():
                     ray.get(self._start_vllm_weight_sync())
 
                 self._log_and_checkpoint(experience, train_metrics, step_start, epoch)
@@ -330,10 +328,7 @@ class GRPOTrainer:
 
             def fill_rollout_queue():
                 nonlocal next_prefetch_idx
-                while (
-                    next_prefetch_idx < len(batches)
-                    and len(pending_rollouts) < prefetch_depth
-                ):
+                while next_prefetch_idx < len(batches) and len(pending_rollouts) < prefetch_depth:
                     batch = batches[next_prefetch_idx]
                     future, expanded_labels, G = self.executor.start_rollout(
                         prompts=batch["prompts"],
@@ -404,7 +399,11 @@ class GRPOTrainer:
                 ray.get(pending_sync)
 
     def _log_and_checkpoint(
-        self, experience: Experience, train_metrics: dict, step_start: float, epoch: int,
+        self,
+        experience: Experience,
+        train_metrics: dict,
+        step_start: float,
+        epoch: int,
     ):
         """Shared logging and checkpointing logic for both sync and async loops."""
         cfg = self.config
@@ -422,9 +421,14 @@ class GRPOTrainer:
         if self.global_step % cfg.training.logging_steps == 0:
             self.metrics.log(step_metrics, step=self.global_step)
 
-        if cfg.training.save_steps > 0 and self.global_step > 0 and self.global_step % cfg.training.save_steps == 0:
+        if (
+            cfg.training.save_steps > 0
+            and self.global_step > 0
+            and self.global_step % cfg.training.save_steps == 0
+        ):
             if cfg.training.save_best_only and self.eval_loader is not None:
-                eval_metric, metric_name = self._evaluate()
+                eval_metric = self._evaluate()
+                metric_name = "accuracy" if self.config.task == "math" else "resolve_rate"
                 eval_metrics = {
                     f"eval_{metric_name}": eval_metric,
                 }
@@ -537,7 +541,7 @@ class GRPOTrainer:
         metric = total_correct / total_samples if total_samples > 0 else 0.0
         metric_name = "accuracy" if self.config.task == "math" else "resolve_rate"
         logger.info(f"Eval {metric_name}: {metric:.4f} ({int(total_correct)}/{total_samples})")
-        return metric, metric_name
+        return metric
 
     def _save_checkpoint(self, final: bool = False):
         output_dir = Path(self.config.logging.output_dir)
