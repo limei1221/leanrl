@@ -145,7 +145,7 @@ def _new_stats() -> dict:
         "total_turns": 0,
         "valid_actions": 0,
         "successful_actions": 0,
-        "files_modified": False,
+        "modified_files": [],
         "used_done": False,
         "tokenizer_drift": False,
         "cat_invocations": 0,
@@ -478,7 +478,7 @@ class MultiTurnExecutor:
             if t.sandbox is not None:
                 diff = t.sandbox.execute("cd /testbed && git diff --name-only")
                 if diff.exit_code == 0 and diff.stdout.strip():
-                    t.stats["files_modified"] = True
+                    t.stats["modified_files"] = diff.stdout.strip().splitlines()
                 reward, _ = compute_swe_reward(t.sandbox, t.task, t.stats)
         finally:
             self.sandbox_pool.release_sandbox(t.pool_key)

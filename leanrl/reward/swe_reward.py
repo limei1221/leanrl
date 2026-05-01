@@ -94,19 +94,28 @@ def _ensure_roman_package(sandbox: "DockerSandbox") -> None:  # type: ignore[nam
             sandbox.write_file(f"{site}/roman.py", _ROMAN_PY)
 
 
-def compute_trajectory_reward(trajectory_stats: dict) -> float:
+def _extract_patch_files(patch: str) -> set[str]:
+    """Extract the b/ filenames from a unified diff (test patch)."""
+    return {m.group(1) for m in re.finditer(r"^diff --git a/\S+ b/(\S+)", patch, re.MULTILINE)}
+
+
+def compute_trajectory_reward(trajectory_stats: dict, test_files: set[str] | None = None) -> float:
     """Compute a dense shaped reward from trajectory-level signals.
 
     Rewards intermediate progress so the model gets nonzero signal even when
     it doesn't pass any tests. Positive components are weighted to total
-    [0, 0.3]; the cat penalty subtracts up to 0.1 — final shaping range is
-    [-0.1, 0.3], always dominated by test pass rewards (up to 1.0).
+    [0, 0.2]; the cat penalty subtracts up to 0.1 — final shaping range is
+    [-0.1, 0.2], always dominated by test pass rewards (up to 1.0).
+
+    The used_done bonus (up to 0.1) is computed separately in compute_swe_reward,
+    gated on f2p_fraction > 0, to prevent the model from collecting it without
+    making any real progress.
 
     Components:
         valid_action_rate:  fraction of turns that produced a parseable action (×0.05)
         success_rate:       fraction of actions that executed with exit_code 0 (×0.05)
-        files_modified:     whether the model modified any source files       (×0.1)
-        used_done:          whether the model signalled <done/>               (×0.1)
+        files_modified:     whether the model modified a .py source file not
+                            introduced by the test patch                      (×0.1)
         cat_penalty:        −0.02 per `cat <file>` invocation, capped at −0.1
     """
     turns = trajectory_stats.get("total_turns", 0)
@@ -115,19 +124,20 @@ def compute_trajectory_reward(trajectory_stats: dict) -> float:
 
     valid = trajectory_stats.get("valid_actions", 0)
     success = trajectory_stats.get("successful_actions", 0)
-    modified = trajectory_stats.get("files_modified", False)
-    used_done = trajectory_stats.get("used_done", False)
+    modified_files: list[str] = trajectory_stats.get("modified_files", [])
     cat_invocations = trajectory_stats.get("cat_invocations", 0)
 
     valid_rate = valid / turns
     success_rate = success / max(valid, 1)
     cat_penalty = min(0.1, 0.02 * cat_invocations)
 
+    excluded = test_files or set()
+    source_modified = any(f.endswith(".py") and f not in excluded for f in modified_files)
+
     return (
         0.05 * valid_rate
         + 0.05 * success_rate
-        + 0.1 * float(modified)
-        + 0.1 * float(used_done)
+        + 0.1 * float(source_modified)
         - cat_penalty
     )
 
@@ -165,10 +175,12 @@ def compute_swe_reward(
         "error": None,
     }
 
-    # Compute trajectory shaping reward
+    # Compute trajectory shaping reward (used_done handled after tests below)
     shaping = 0.0
+    test_files: set[str] = set()
     if trajectory_stats is not None:
-        shaping = compute_trajectory_reward(trajectory_stats)
+        test_files = _extract_patch_files(task.test_patch)
+        shaping = compute_trajectory_reward(trajectory_stats, test_files)
     info["shaping_reward"] = shaping
 
     # Ensure the 'roman' package exists (missing from some sphinx containers)
@@ -225,7 +237,14 @@ def compute_swe_reward(
     test_reward = 0.0 if has_regression else f2p_fraction
     info["test_reward"] = test_reward
 
-    return test_reward + shaping, info
+    # used_done bonus: only rewarded if tests actually improved; prevents
+    # the model from collecting 0.1 by emitting <done/> without fixing anything
+    used_done_bonus = 0.0
+    if trajectory_stats is not None and trajectory_stats.get("used_done") and f2p_fraction > 0:
+        used_done_bonus = 0.1
+    info["shaping_reward"] += used_done_bonus
+
+    return test_reward + shaping + used_done_bonus, info
 
 
 def compute_swe_rewards_batch(
