@@ -94,7 +94,7 @@ def test_main_uses_training_aligned_swe_defaults(monkeypatch):
     eval_swe.main()
 
     assert called["model_path"] == "stub-model"
-    assert called["max_turns"] == 10
+    assert called["max_turns"] == 20
     assert called["max_new_tokens"] == 2048
     assert called["enable_thinking"] is True
 

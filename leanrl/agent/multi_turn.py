@@ -50,6 +50,9 @@ def parse_action(text: str) -> tuple[str, str]:
     bash_fence = re.search(r"```(?:bash|sh)\s*\n(.*?)```", text, re.DOTALL)
     if bash_fence:
         content = bash_fence.group(1).strip()
+        # mini-swe-agent completion signal
+        if "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in content:
+            return ACTION_DONE, ""
         # Model sometimes puts <done/> inside a bash block — treat as done signal
         if re.match(r"<done\s*/?>$", content, re.IGNORECASE):
             return ACTION_DONE, ""
@@ -59,11 +62,15 @@ def parse_action(text: str) -> tuple[str, str]:
     if re.search(r"<done\s*/?>", text, re.IGNORECASE):
         return ACTION_DONE, ""
 
+    # Plain echo completion signal (no fences)
+    if "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in text:
+        return ACTION_DONE, ""
+
     # No recognizable action — treat as done
     return ACTION_DONE, ""
 
 
-def format_observation(result: SandboxResult, max_chars: int = 4096) -> str:
+def format_observation(result: SandboxResult, max_chars: int = 10000) -> str:
     """Format sandbox execution result as an observation for the model."""
     output = result.stdout
     if result.stderr:
@@ -114,16 +121,38 @@ def _append_prompt_delta(
     return True
 
 
-SYSTEM_PROMPT = """Fix the bug in the repo at /testbed.
+SYSTEM_PROMPT = """You are a software engineer working in a bash terminal to fix a GitHub issue. \
+The repository is already checked out at /testbed. Your environment has PAGER=cat and TQDM_DISABLE=1.
 
-Format every turn as: brief reasoning in plain text, then a bash command in <bash>...</bash>. The <bash> block must contain shell commands only — no comments, no prose. Emit <done/> when the fix is complete and tests pass.
+Every response must follow this exact format:
 
-Rules:
-- Each action runs in a fresh shell. Start with `cd /testbed && ...`.
-- Read files in bounded ranges with `sed -n '<a>,<b>p'`, `head`, `tail`, or `grep -n`. Never `cat` a source file.
-- No interactive editors (vi/nano/emacs).
-- Modify source files only — do not change tests or configuration.
-- Run the relevant tests before emitting <done/>."""
+THOUGHT:
+<your reasoning about what to do next>
+
+```bash
+<single bash command>
+```
+
+One command per response — no exceptions.
+
+When you have completely fixed the issue and verified the fix, run:
+```bash
+echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+```
+
+Workflow:
+1. Analyze the issue and explore the codebase to understand the affected code.
+2. Reproduce the bug with a minimal test case or the provided failing test.
+3. Edit the source file(s) to fix the root cause — never modify tests.
+4. Verify the fix by running the failing test(s) and confirming they pass.
+5. Submit with `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`.
+
+Tips:
+- Use `grep -n`, `grep -r`, or `find` to locate relevant code — avoid reading whole files.
+- To read a section: `sed -n '<start>,<end>p' file` or `head -N file | tail -M`.
+- For multi-line edits prefer Python: `python3 -c "p='f'; t=open(p).read(); open(p,'w').write(t.replace('old','new'))"`.
+- Command output is truncated to 10,000 characters — keep output concise.
+- Each command runs in a fresh shell; use `cd /testbed && ...` when needed."""
 
 
 def build_initial_prompt(problem_statement: str) -> list[dict[str, str]]:

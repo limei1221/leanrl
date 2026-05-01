@@ -142,7 +142,8 @@ def run_trajectory(
                         print(f"  → loop detected ({repeat_count} repeats), nudging model")
                     messages.append({"role": "assistant", "content": response_text})
                     messages.append({"role": "user", "content":
-                        "You are repeating the same action. Try a different approach."
+                        "You are repeating the same action. Try a different approach.\n\n"
+                        "THOUGHT:\n<your new reasoning>\n\n```bash\n<different command>\n```"
                     })
                     last_action = None
                     repeat_count = 0
@@ -155,15 +156,16 @@ def run_trajectory(
             messages.append({"role": "assistant", "content": response_text})
 
             if action_type == ACTION_DONE:
-                # Genuine <done/> tag — model signalled completion
-                if re.search(r"<done\s*/?>", response_text, re.IGNORECASE):
+                # Model signalled completion via <done/> or COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+                if re.search(r"<done\s*/?>", response_text, re.IGNORECASE) or \
+                        "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in response_text:
                     break
                 # No parseable action — prompt the model to give one
                 if verbose:
                     print(f"  → no action found, prompting for explicit action")
                 messages.append({"role": "user", "content":
-                    "Please provide a bash command wrapped in <bash>...</bash> tags, "
-                    "or <done/> if you are finished."
+                    "Your response did not contain a bash command. "
+                    "Please respond with:\n\nTHOUGHT:\n<reasoning>\n\n```bash\n<command>\n```"
                 })
                 continue
 
@@ -181,7 +183,7 @@ def run_trajectory(
             observation = format_observation(result)
 
             # Add observation as a new user turn to maintain proper chat format
-            messages.append({"role": "user", "content": f"[Observation]\n{observation}\n\nContinue fixing the issue."})
+            messages.append({"role": "user", "content": observation})
 
         # Use a longer timeout for the final test scoring run.
         sandbox.timeout = test_timeout
@@ -290,8 +292,8 @@ def main() -> None:
                         help="Number of instances to evaluate (default: 16)")
     parser.add_argument("--random_seed", type=int, default=42,
                         help="Random seed for sampling instances (default: None = no shuffle)")
-    parser.add_argument("--max_turns", type=int, default=10,
-                        help="Max agent turns per instance (default: 10)")
+    parser.add_argument("--max_turns", type=int, default=20,
+                        help="Max agent turns per instance (default: 20)")
     parser.add_argument("--max_new_tokens", type=int, default=2048,
                         help="Max tokens to generate per turn (default: 2048)")
     parser.add_argument("--max_workers", type=int, default=8,
