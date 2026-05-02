@@ -18,7 +18,8 @@ Supported tasks:
 
 ```bash
 # Install
-conda create -n leanrl python=3.12 -y && conda activate leanrl
+conda create -n leanrl python=3.12 -y
+conda activate leanrl
 pip install -e ".[dev]"
 
 # System dependencies required by DeepSpeed:
@@ -118,8 +119,9 @@ default: max_turns=20, max_new_tokens=2048
 |------------|-------|--------------|
 | baseline | ricdomolm/mini-coder-1.7b | 0.0%  (0/16) (max_turns=10, max_new_tokens=2048) |
 | baseline | ricdomolm/mini-coder-1.7b | 0.0%  (0/16) (max_turns=15, max_new_tokens=2048) |
-| baseline | ricdomolm/mini-coder-1.7b | 6.2%  (1/16) (max_turns=20, max_new_tokens=2048) |
-| exp |  |  |
+| baseline | ricdomolm/mini-coder-1.7b | 6.2%  (1/16) |
+| exp | TODO |  |
+| ref | ricdomolm/mini-coder-4b | 6.2%  (1/16) |
 
 ## License
 

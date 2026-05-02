@@ -33,7 +33,7 @@ training:
   seed: 42
 
 swe:
-  max_turns: 15
+  max_turns: 20
   docker_image_prefix: swebench
   sandbox_timeout: 120
   max_concurrent_sandboxes: 16

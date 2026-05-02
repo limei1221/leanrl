@@ -79,7 +79,7 @@ bash scripts/train_swe.sh
 ```bash
 python scripts/eval_math.py --model_name_or_path <checkpoint>/final --batch_size 128
 python scripts/eval_swe.py --model_name_or_path <checkpoint>/final --num_gpus 1
-python scripts/eval_swe_oracle.py  # golden patch baseline (resolve_rate: 0.86)
+python scripts/eval_swe_oracle.py  # golden-patch baseline (resolve rate: 85.7%, 257/300)
 ```
 
 Eval datasets:
@@ -108,7 +108,7 @@ The main loop alternates between three phases per batch:
 | `leanrl/rollout.py` | `RolloutEngine` Ray actor wrapping vLLM; `WeightUpdateExtension` for in-place weight sync |
 | `leanrl/experience.py` | `Experience` dataclass (batched rollouts), `build_experience_from_rollouts` |
 | `leanrl/agent/single_turn.py` | Math executor: formats prompts, generates completions, computes reference log-probs |
-| `leanrl/agent/multi_turn.py` | SWE-bench executor: multi-turn agent loop with `parse_action` (XML tags or markdown fences) |
+| `leanrl/agent/multi_turn.py` | SWE-bench executor: multi-turn agent loop with `parse_action` (mini-swe-agent THOUGHT + bash fence) |
 | `leanrl/agent/sandbox.py` | `DockerSandbox` (single container), `SandboxPool` (concurrent), SWE-bench task management |
 | `leanrl/reward/math_reward.py` | `extract_gsm8k_answer` (tries `####`, `\boxed{}`, last number), `compute_math_rewards` |
 | `leanrl/reward/swe_reward.py` | Runs fail_to_pass/pass_to_pass tests, parses pytest/unittest output |
@@ -135,11 +135,19 @@ Max rollout staleness = `rollout_prefetch_depth + weight_sync_interval − 1` st
 
 ### SWE-bench Agent Actions
 
-`parse_action()` in `multi_turn.py` accepts two formats:
-- XML: `<bash>cmd</bash>`, `<edit path="file">content</edit>`, `<done/>`
-- Markdown fences: ` ```bash `, ` ```python `, etc.
+The SWE prompt follows the mini-swe-agent format: each turn is `THOUGHT: <reasoning>` followed by a single ` ```bash ` (or ` ```sh `) fenced command. Completion is signaled by `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` inside the fence. `parse_action()` in `multi_turn.py` also accepts legacy `<bash>cmd</bash>` and `<done/>` tags, and falls back to "done" on unparseable output. Observations are truncated to 10k chars in `format_observation`.
 
 Non-model tokens (observations/system messages) are masked out via `response_mask` in `Experience` so only model-generated tokens contribute to the loss. This masking is critical for multi-turn SWE-bench where environment outputs are interleaved with model generations.
+
+### SWE Reward Shaping (Anti-Hacking)
+
+`compute_trajectory_reward` in `swe_reward.py` adds a dense shaped reward bounded to `[−0.1, +0.2]`:
+- `+0.05 × valid_action_rate` — fraction of turns that produced a parseable action
+- `+0.05 × success_rate` — fraction of valid actions that exited 0
+- `+0.1` if a non-test `.py` source file was modified (test-patch files are excluded via `_extract_patch_files`)
+- `−0.02` per `cat <file>` invocation on source, capped at `−0.1` (`_CAT_PAT` excludes heredocs)
+
+A separate `+0.1` `used_done` bonus is added in `compute_swe_reward` only when `f2p_fraction > 0`, which prevents the model from collecting it by emitting the completion signal without making real progress. Combined shaping range is `[−0.1, +0.3]`; the `reward > 1.0` success threshold ensures only fully resolved instances count, since test reward is bounded to `[0, 1.0]`.
 
 ### SWE-bench Batched Multi-Turn Rollouts
 
@@ -158,7 +166,7 @@ All training hyperparameters are in YAML configs under `configs/`. Key sections:
 
 ### Success Thresholds
 
-Success is task-dependent: math uses `reward > 0`, SWE uses `reward > 1.0` (test reward is up to 1.0 and reward shaping adds up to 0.3, so only fully resolved instances exceed 1.0).
+Success is task-dependent: math uses `reward > 0`, SWE uses `reward > 1.0` (test reward is bounded to `[0, 1.0]` and shaping is bounded to `[−0.1, +0.3]`, so only fully resolved instances exceed 1.0). See *SWE Reward Shaping* above for the shaping breakdown.
 
 ### Baselines
 
