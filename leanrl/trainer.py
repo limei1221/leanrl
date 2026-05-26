@@ -39,6 +39,7 @@ class GRPOTrainer:
         self.global_step = 0
         self.best_eval_metric = -1.0
         self._vllm_sync_skipped_total = 0
+        self._eval_time_total = 0.0
 
     def _setup_infrastructure(self):
         """Initialize Ray cluster."""
@@ -226,16 +227,23 @@ class GRPOTrainer:
         output_dir.mkdir(parents=True, exist_ok=True)
         os.utime(output_dir, None)
 
+        train_start = time.time()
         if self._use_async_prefetch():
             logger.info("Async rollout prefetching enabled")
             self._train_async()
         else:
             self._train_sync()
+        # Wall-clock of the training loop minus time spent in evaluation.
+        train_time = time.time() - train_start - self._eval_time_total
 
         # Final save — always save regardless of save_best_only
         self._save_checkpoint(final=True)
         self.metrics.finish()
-        logger.info("Training complete!")
+        logger.info(
+            f"Training complete! Total training time (excluding eval): "
+            f"{train_time:.1f}s ({train_time / 60:.1f} min) | "
+            f"eval time: {self._eval_time_total:.1f}s"
+        )
 
     def _train_sync(self):
         """Sequential training loop (original flow)."""
@@ -519,6 +527,7 @@ class GRPOTrainer:
     def _evaluate(self) -> float:
         """Run eval and return the metric (accuracy for math, resolve_rate for swe)."""
         logger.info("Running evaluation...")
+        eval_start = time.time()
         total_correct = 0
         total_samples = 0
 
@@ -541,6 +550,7 @@ class GRPOTrainer:
         metric = total_correct / total_samples if total_samples > 0 else 0.0
         metric_name = "accuracy" if self.config.task == "math" else "resolve_rate"
         logger.info(f"Eval {metric_name}: {metric:.4f} ({int(total_correct)}/{total_samples})")
+        self._eval_time_total += time.time() - eval_start
         return metric
 
     def _save_checkpoint(self, final: bool = False):
