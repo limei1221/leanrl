@@ -139,6 +139,10 @@ class PolicyModel:
             # gradient_checkpointing requires use_cache=False; otherwise HF
             # silently bypasses checkpointing and activations grow per layer.
             self.model.config.use_cache = False
+            # Force the embedding output to require grad so the first
+            # checkpointed segment has a differentiable input; without this,
+            # (reentrant) torch.utils.checkpoint can silently drop gradients.
+            self.model.enable_input_require_grads()
             self.model.gradient_checkpointing_enable()
 
         ds_config = get_deepspeed_config(infra_cfg, training_cfg, total_steps)
