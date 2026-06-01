@@ -103,7 +103,7 @@ The main loop alternates between three phases per batch:
 | File | Role |
 |------|------|
 | `leanrl/trainer.py` | Orchestrator: Ray init, model setup, data loading, training loop, checkpointing |
-| `leanrl/grpo.py` | GRPO loss: `compute_grpo_advantages`, `compute_kl_penalty` (k3 estimator), `grpo_loss` |
+| `leanrl/grpo.py` | GRPO loss: `compute_grpo_advantages`, `compute_kl_penalty` (k3 estimator), `grpo_policy_loss` (clipped surrogate, returns loss + ratio), `grpo_loss` (combines policy loss + KL + optional entropy, emits the `clip_fraction`/`importance_ratio` metrics) |
 | `leanrl/models.py` | `PolicyModel` (DeepSpeed ZeRO-2/3), `ReferenceModel` (frozen, CPU-offloadable), weight sync logic |
 | `leanrl/rollout.py` | `RolloutEngine` Ray actor wrapping vLLM; `WeightUpdateExtension` for in-place weight sync |
 | `leanrl/experience.py` | `Experience` dataclass (batched rollouts), `build_experience_from_rollouts` |
@@ -114,6 +114,14 @@ The main loop alternates between three phases per batch:
 | `leanrl/reward/swe_reward.py` | Runs fail_to_pass/pass_to_pass tests, parses pytest/unittest output |
 | `leanrl/data/dataset.py` | `PromptDataset` for GSM8K and SWE-bench_Lite; `build_prompt_dataloader` |
 | `leanrl/utils/config.py` | Config dataclasses loaded from YAML (`TrainConfig` → `ModelConfig`, `GRPOConfig`, etc.) |
+
+### Task Dispatch & Extension Point
+
+`GRPOTrainer._setup_executor` (`trainer.py`) switches on `config.task` to build the agent executor — the single object that owns rollout generation, reward scoring, and reference log-probs for a task:
+- `task: "math"` → `SingleTurnExecutor`, constructed with `compute_math_rewards` injected as `reward_fn`.
+- `task: "swe"` → `MultiTurnExecutor`, which embeds SWE reward scoring internally and also takes `policy_model` (for in-loop logprob refresh).
+
+There is no standalone reward-router class (despite the README diagram) — reward selection rides on this executor dispatch. To add a task, add an executor (plus a reward fn) and a branch here rather than special-casing the loop: the training loop is otherwise task-agnostic and only forks on `config.task` for metric naming (`accuracy` vs `resolve_rate`) and the async-prefetch guard.
 
 ### GPU Memory Layout (2×GPU setup)
 
@@ -155,7 +163,7 @@ A separate `+0.1` `used_done` bonus is added in `compute_swe_reward` only when `
 
 ### Configuration
 
-All training hyperparameters are in YAML configs under `configs/`. Key sections:
+All training hyperparameters are in YAML configs under `configs/` — two ship today: `math_grpo_1.5b.yaml` and `swe_grpo_1.5b.yaml`. The dataclass defaults in `utils/config.py` are conservative and the shipped YAMLs override them, so trust the YAML over the dataclass default (e.g. `SWEConfig.max_turns` defaults to `10` in code but `swe_grpo_1.5b.yaml` sets `20`). Key sections:
 - `task`: `"math"` or `"swe"` — selects reward function and agent type
 - `model`: `model_name_or_path`, optional `ref_model_name_or_path` (defaults to same model)
 - `grpo`: `n_samples_per_prompt` (G), `kl_coef`, `clip_range`, `entropy_coef`

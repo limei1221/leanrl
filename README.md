@@ -72,14 +72,6 @@ Each training step follows the GRPO loop:
 
 When `training.async_prefetch: true` and `infra.vllm_enable_sleep: false` (dedicated GPUs), the trainer overlaps vLLM generation on GPU 1 with training on GPU 0. A bounded queue of up to `training.rollout_prefetch_depth` rollouts is kept ready on GPU 1; weight sync back to vLLM runs every `infra.weight_sync_interval` training steps (and is forced before eval/checkpoint saves).
 
-```
-Sequential: [Gen N] [Train N] [Sync] [Gen N+1] [Train N+1] ...
-Async:      [Gen N..N+D] [Train N + background gen/sync] [Train N+1 + ...] ...
-            where D = rollout_prefetch_depth
-```
-
-Prefetched rollouts can be up to `rollout_prefetch_depth + weight_sync_interval − 1` steps stale, which is handled by PPO/GRPO importance sampling — watch the `importance_ratio` metric in wandb for actual drift. Only available for single-turn (math) tasks.
-
 ## Configuration
 
 All hyperparameters live in YAML files under `configs/`. See `leanrl/utils/config.py` for the full schema.
@@ -100,14 +92,17 @@ python scripts/eval_swe_oracle.py --num_samples 16  # golden-patch baseline on 1
 
 ### Math
 
-Hardware: 2× A100 (80 GB each), ~465 GB RAM, 27.2 vCPUs, 30 GB disk. Python 3.12.3, PyTorch 2.8.0+cu128.
+Hardware: 2x A100 SXM4 (80 GB VRAM), ~1453 GB RAM, 128 CPUs, 60 GB disk. Python 3.12.13, PyTorch 2.8.0+cu128.
+enable_thinking=False
+Total training time: 3.72h
+Throughput: 8.89 rollouts/sec (119056 rollouts) | 2227.7 tokens/sec (29827546 generated tokens)
 
 |  | Model | Accuracy |
 |------------|-------|----------|
-| baseline | Qwen/Qwen3-1.7B | 74.3%  (980/1319) |
-| exp | output/math_grpo_1.5b/final | 84.2%  (1111/1319) |
-| ref1 | Qwen/Qwen2.5-Math-1.5B-Instruct | 85.1%  (1123/1319) |
-| ref2 | Qwen/Qwen2.5-Math-7B-Instruct | 95.3%  (1257/1319) |
+| baseline | Qwen/Qwen3-1.7B | 74.8%  (985/1319) |
+| exp | output/math_grpo_1.5b/final | 83.7%  (1104/1319) |
+| ref1 | Qwen/Qwen2.5-Math-1.5B-Instruct | 85.3%  (1125/1319) |
+| ref2 | Qwen/Qwen2.5-Math-7B-Instruct | 95.1%  (1255/1319) |
 
 ### Coding
 

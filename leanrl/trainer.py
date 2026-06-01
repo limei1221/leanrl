@@ -40,6 +40,9 @@ class GRPOTrainer:
         self.best_eval_metric = -1.0
         self._vllm_sync_skipped_total = 0
         self._eval_time_total = 0.0
+        # Throughput accounting (training rollouts only; eval excluded).
+        self._total_rollouts = 0
+        self._total_gen_tokens = 0
 
     def _setup_infrastructure(self):
         """Initialize Ray cluster."""
@@ -236,6 +239,21 @@ class GRPOTrainer:
         # Wall-clock of the training loop minus time spent in evaluation.
         train_time = time.time() - train_start - self._eval_time_total
 
+        # Throughput over the training time (eval excluded from the denominator).
+        denom = max(train_time, 1e-9)
+        rollouts_per_sec = self._total_rollouts / denom
+        tokens_per_sec = self._total_gen_tokens / denom
+        self.metrics.log(
+            {
+                "train_time_sec": train_time,
+                "total_rollouts": self._total_rollouts,
+                "total_gen_tokens": self._total_gen_tokens,
+                "rollouts_per_sec": rollouts_per_sec,
+                "tokens_per_sec": tokens_per_sec,
+            },
+            step=self.global_step,
+        )
+
         # Final save — always save regardless of save_best_only
         self._save_checkpoint(final=True)
         self.metrics.finish()
@@ -243,6 +261,11 @@ class GRPOTrainer:
             f"Training complete! Total training time (excluding eval): "
             f"{train_time:.1f}s ({train_time / 60:.1f} min) | "
             f"eval time: {self._eval_time_total:.1f}s"
+        )
+        logger.info(
+            f"Throughput (over {train_time:.1f}s, excluding eval): "
+            f"{rollouts_per_sec:.2f} rollouts/sec ({self._total_rollouts} rollouts) | "
+            f"{tokens_per_sec:.1f} tokens/sec ({self._total_gen_tokens} generated tokens)"
         )
 
     def _train_sync(self):
@@ -415,6 +438,13 @@ class GRPOTrainer:
     ):
         """Shared logging and checkpointing logic for both sync and async loops."""
         cfg = self.config
+
+        # Accumulate throughput counts for this training step. response_mask
+        # is 1 only on model-generated tokens, so this excludes prompt tokens
+        # and (for multi-turn SWE) interleaved environment observations.
+        self._total_rollouts += len(experience)
+        self._total_gen_tokens += int(experience.response_mask.sum().item())
+
         success_mask = self._success_mask(experience.rewards)
 
         step_time = time.time() - step_start

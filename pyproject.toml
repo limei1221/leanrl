@@ -7,7 +7,7 @@ name = "leanrl"
 version = "0.1.0"
 description = "A minimal RL post-training framework for LLMs using Ray + PyTorch + vLLM"
 readme = "README.md"
-license = {text = "Apache-2.0"}
+license = {text = "MIT"}
 requires-python = ">=3.10"
 dependencies = [
     "torch==2.8.0",

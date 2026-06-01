@@ -22,7 +22,7 @@ training:
   weight_decay: 0.01
   warmup_ratio: 0.03
   train_batch_size: 64
-  micro_batch_size: 16
+  micro_batch_size: 8
   num_epochs: 1
   save_steps: 50
   logging_steps: 1
